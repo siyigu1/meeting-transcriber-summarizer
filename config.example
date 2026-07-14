@@ -1,0 +1,25 @@
+# Optional personal overrides for meeting-record.sh.
+# Copy to `config.local` (gitignored) and edit. Use the ${VAR:-...} form so
+# environment variables still take precedence over this file.
+
+# Where session folders are created (default: ~/meetings)
+MEETING_DIR="${MEETING_DIR:-$HOME/meetings}"
+
+# Whisper model path (default: models/ggml-large-v3-turbo.bin next to the script)
+#WHISPER_MODEL="${WHISPER_MODEL:-$HOME/models/ggml-large-v3-turbo.bin}"
+
+# Audio devices as shown by: ffmpeg -f avfoundation -list_devices true -i ""
+#MIC_DEVICE="${MIC_DEVICE:-MacBook Pro Microphone}"
+#SYS_DEVICE="${SYS_DEVICE:-BlackHole 2ch}"
+
+# Speaker labels in transcripts
+#ME_LABEL="${ME_LABEL:-Me}"
+#OTHER_LABEL="${OTHER_LABEL:-Other}"
+
+# Auto-end tuning (see README)
+#CALL_END_GRACE_SEC="${CALL_END_GRACE_SEC:-60}"
+#AUTO_END_SEC="${AUTO_END_SEC:-300}"
+#SILENCE_DB="${SILENCE_DB:--45}"
+
+# Context prompt passed to whisper (names/jargon that are often mis-transcribed)
+#WHISPER_PROMPT="${WHISPER_PROMPT:-}"

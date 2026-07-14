@@ -1,0 +1,4 @@
+config.local
+models/*.bin
+*.wav
+.DS_Store
