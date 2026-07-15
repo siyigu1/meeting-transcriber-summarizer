@@ -27,8 +27,10 @@
 #   transcript.segments.md    same, with timestamps
 #
 # Requirements: ffmpeg, whisper-cli (brew install whisper-cpp), model file below.
-# For system audio (other meeting participants): BlackHole 2ch + a Multi-Output
-# device as your Mac's sound output. Without BlackHole, only your mic is recorded.
+# For system audio (other meeting participants), preferred: the bundled `audiotap`
+# helper (build with: swiftc -O -o audiotap audiotap.swift; macOS 14.4+, one-time
+# System Audio Recording permission — no output re-routing needed). Fallback:
+# BlackHole 2ch + a Multi-Output device. With neither, only your mic is recorded.
 #
 # Configuration: environment variables below, or put overrides in a `config.local`
 # file next to this script (gitignored; see config.example).
@@ -76,11 +78,15 @@ start_segment() {  # spawns ffmpeg recorders for segment $SEG
   ffmpeg -hide_banner -loglevel error -f avfoundation -i ":${MIC_IDX}" \
     -ac 1 -ar 16000 -c:a pcm_s16le "$SESSION/${tag}-mic.wav" &
   MIC_PID=$!
-  if [[ -n "$SYS_IDX" ]]; then
-    ffmpeg -hide_banner -loglevel error -f avfoundation -i ":${SYS_IDX}" \
-      -ac 1 -ar 16000 -c:a pcm_s16le "$SESSION/${tag}-sys.wav" &
-    SYS_PID=$!
-  fi
+  case "$SYS_MODE" in
+    tap)
+      "$SCRIPT_DIR/audiotap" "$SESSION/${tag}-sys.wav" 2>/dev/null &
+      SYS_PID=$! ;;
+    blackhole)
+      ffmpeg -hide_banner -loglevel error -f avfoundation -i ":${SYS_IDX}" \
+        -ac 1 -ar 16000 -c:a pcm_s16le "$SESSION/${tag}-sys.wav" &
+      SYS_PID=$! ;;
+  esac
   SEG_START=$SECONDS
 }
 
@@ -146,16 +152,27 @@ setup_session() {
   MIC_IDX=$(device_index "$MIC_NAME")
   [[ -n "$MIC_IDX" ]] || die "Mic device '$MIC_NAME' not found. Devices:
 $(list_devices)"
-  SYS_IDX=$(device_index "$SYS_NAME")
-  if [[ -z "$SYS_IDX" ]]; then
-    log "⚠️  '$SYS_NAME' not found — recording MIC ONLY (other participants will be"
-    log "   missed unless you're on speakers). See README for BlackHole setup."
-  fi
   local stamp
   stamp=$(date +%Y-%m-%d_%H%M)
   SESSION="$BASE_DIR/${stamp}${NAME:+_$NAME}"
   mkdir -p "$SESSION"
   echo "$SESSION" > "$BASE_DIR/.current-session"
+  # system-audio source: native process tap (preferred, macOS 14.4+) > BlackHole > none
+  SYS_MODE="none" ; SYS_IDX="" ; SYS_DESC=""
+  if [[ -x "$SCRIPT_DIR/audiotap" ]] &&
+     "$SCRIPT_DIR/audiotap" "$SESSION/.tap-probe.wav" 0.3 >/dev/null 2>&1; then
+    SYS_MODE="tap" ; SYS_DESC="system: native audio tap"
+  else
+    SYS_IDX=$(device_index "$SYS_NAME")
+    if [[ -n "$SYS_IDX" ]]; then
+      SYS_MODE="blackhole" ; SYS_DESC="system: [$SYS_IDX] $SYS_NAME"
+    fi
+  fi
+  rm -f "$SESSION/.tap-probe.wav"
+  if [[ "$SYS_MODE" == "none" ]]; then
+    log "⚠️  No system-audio source (audiotap helper or '$SYS_NAME') — recording MIC ONLY"
+    log "   (other participants will be missed unless you're on speakers). See README."
+  fi
   SEG=1 ; RECORDED=0 ; MIC_PID="" ; SYS_PID="" ; SEG_START=$SECONDS ; PAUSED=0
 }
 
@@ -330,7 +347,7 @@ if [[ "$CMD" == "start" ]]; then
   }
   trap daemon_stop INT TERM
   log "🔴 Recording (daemon) to $SESSION"
-  log "   mic: [$MIC_IDX] $MIC_NAME ${SYS_IDX:+ |  system: [$SYS_IDX] $SYS_NAME}"
+  log "   mic: [$MIC_IDX] $MIC_NAME ${SYS_DESC:+ |  $SYS_DESC}"
   log "   Control with: $0 ctl pause|resume|end|status"
   log "   Auto-end: call-closed detection${CALL_END_GRACE_SEC:+ (grace ${CALL_END_GRACE_SEC}s)}, silence fallback ${AUTO_END_SEC}s"
   start_segment
@@ -415,7 +432,7 @@ cleanup_and_exit() {
 trap 'TRANSCRIBE_AFTER=0; cleanup_and_exit' INT
 
 log "🔴 Recording to $SESSION"
-log "   mic: [$MIC_IDX] $MIC_NAME ${SYS_IDX:+ |  system: [$SYS_IDX] $SYS_NAME}"
+log "   mic: [$MIC_IDX] $MIC_NAME ${SYS_DESC:+ |  $SYS_DESC}"
 log "   Keys:  p = pause/resume   e = end + transcribe   q = end (no transcribe)"
 start_segment
 

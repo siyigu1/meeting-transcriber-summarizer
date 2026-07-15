@@ -4,7 +4,7 @@ Record meetings (Google Meet, Zoom, Slack huddles, …) on a Mac and transcribe 
 
 **Features**
 
-- Records **both sides** of a call: your mic + the meeting audio (via a loopback device), as separate streams
+- Records **both sides** of a call: your mic + the meeting audio, as separate streams — meeting audio via a native Core Audio system tap (no virtual devices, no output re-routing, works with headphones), with BlackHole as a fallback for older macOS
 - **Speaker labels** without any ML: `Me:` vs `Other:`, attributed by comparing per-segment energy between the two streams
 - Pause / resume / end controls — interactive keys in a terminal, or file-based control for driving it from scripts and agents
 - **Auto-end**: detects when the call closes (Zoom & Slack huddle media connections, Google Meet tabs), with a silence fallback
@@ -21,15 +21,27 @@ Record meetings (Google Meet, Zoom, Slack huddles, …) on a Mac and transcribe 
   ```
 - Your terminal needs Microphone permission (System Settings → Privacy & Security → Microphone); macOS prompts on first recording.
 
-### System audio (one-time, ~3 min)
+### System audio (one-time)
 
-The mic only captures you. To capture the other participants, install [BlackHole](https://github.com/ExistentialAudio/BlackHole) and mirror your output through it:
+The mic only captures you. To capture the other participants, the recorder uses a **native Core Audio process tap** (the same mechanism commercial meeting recorders use) — build the bundled helper once:
 
-1. `brew install blackhole-2ch` (needs your password)
+```
+swiftc -O -o audiotap audiotap.swift
+```
+
+(needs Xcode or the Command Line Tools; macOS 14.4+). The first recording triggers a one-time **System Audio Recording** permission prompt for your terminal — approve it (manage later under System Settings → Privacy & Security → Screen & System Audio Recording). That's it: no virtual devices, no output switching, headphones work as-is. The recorder auto-detects the helper.
+
+<details>
+<summary>Fallback for macOS &lt; 14.4: BlackHole loopback</summary>
+
+1. `brew install blackhole-2ch`
 2. Open **Audio MIDI Setup** → **+** → **Create Multi-Output Device** → check both your real output (speakers/headphones) **and** BlackHole 2ch. Keep your real output first (it's the clock source) and enable **Drift Correction** on BlackHole.
-3. During meetings, set the Mac's sound output to that Multi-Output Device. You hear everything normally; BlackHole gets a copy for recording.
+3. During meetings, set the Mac's sound output to that Multi-Output Device. You hear everything normally; BlackHole gets a copy for recording. (Volume keys don't work while it's selected — set volume first.)
 
-Notes: macOS volume keys don't work while a Multi-Output Device is selected — set your volume before switching. Without BlackHole the recorder still works, but mic-only (fine on speakers in a quiet room) and without speaker labels.
+The recorder uses BlackHole automatically when the `audiotap` helper isn't available.
+</details>
+
+With neither, the recorder still works but is mic-only (fine on speakers in a quiet room) and transcripts are unlabeled.
 
 ## Usage
 

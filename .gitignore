@@ -1,4 +1,5 @@
 config.local
 models/*.bin
+audiotap
 *.wav
 .DS_Store

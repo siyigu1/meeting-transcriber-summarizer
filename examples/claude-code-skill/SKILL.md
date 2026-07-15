@@ -21,7 +21,7 @@ Decide the mode from the user's intent:
    $REC start --name <short-slug>
    ```
    Derive `<short-slug>` from what the user says the meeting is; omit `--name` if unknown.
-2. Read the task output after a few seconds to confirm it's recording, and check for the `⚠️ BlackHole not found` warning — if present, tell the user only their mic is being captured (fine on speakers, misses other participants on headphones) and that system output must be set to the Multi-Output Device (see the project README).
+2. Read the task output after a few seconds to confirm it's recording, and check for the `⚠️ No system-audio source` warning — if present, tell the user only their mic is being captured (fine on speakers, misses other participants on headphones) and point them to the README's system-audio setup (build the `audiotap` helper, or BlackHole on older macOS).
 3. Report the session dir and tell the user: say **pause**, **resume**, or **end** here anytime — or just close the call, which is auto-detected. Then wait — do not poll during the meeting.
 
 ## Auto-end
