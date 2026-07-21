@@ -21,9 +21,9 @@
 #
 #   WATCH (meeting auto-detect):
 #     ./meeting-record.sh watch
-#       Polls for a live call (Zoom / Slack huddle / Meet tab in Chrome). When one
-#       appears and nothing is recording, posts a macOS notification — clicking it
-#       starts the recording daemon. Requires: brew install terminal-notifier.
+#       Polls for a live call (Zoom / Slack huddle / Google Meet). When one appears
+#       and nothing is recording, shows a native "Record it?" dialog — one click
+#       starts the recording daemon. No extra dependencies.
 #     ./meeting-record.sh watch-install | watch-uninstall
 #       Install/remove a launchd agent so the watcher runs at login.
 #
@@ -175,16 +175,22 @@ streams_silent() {  # true if every stream currently recording is below SILENCE_
   [[ "$any" == 1 ]]
 }
 
-call_active() {  # true if a Zoom call, Slack huddle, or Google Meet tab is currently live
+call_udp_media() {  # $1 = process name — true if it holds a live UDP media flow.
+  # Exclude :443 — that's QUIC (HTTP/3) web traffic; Slack and Chrome hold such
+  # flows while completely idle, which is NOT a call.
+  lsof -a -c "$1" -iUDP -nP 2>/dev/null | grep -- '->' | grep -qvE ':443$'
+}
+
+call_active() {  # true if a Zoom call, Slack huddle, or Google Meet call is currently live
   # Zoom / Slack keep live UDP media flows only while in a call/huddle
   local app
   for app in zoom.us Slack; do
-    if pgrep -xq "$app" && lsof -a -c "$app" -iUDP -nP 2>/dev/null | grep -q -- '->'; then
-      return 0
-    fi
+    pgrep -xq "$app" && call_udp_media "$app" && return 0
   done
-  # Meet: an open Chrome tab on an in-meeting URL (guard pgrep — osascript would launch Chrome)
   if pgrep -xq "Google Chrome"; then
+    # Meet media: in-call Chrome streams to Google over UDP 193xx (no permissions needed)
+    lsof -a -c "Google Chrome" -iUDP -nP 2>/dev/null | grep -qE ':193[0-9]{2}$' && return 0
+    # Meet tab: an open tab on an in-meeting URL (needs Automation-for-Chrome permission)
     osascript -e 'tell application "Google Chrome" to get URL of tabs of every window' 2>/dev/null |
       grep -qE 'meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}' && return 0
   fi
@@ -201,10 +207,18 @@ recording_active() {  # true if the most recent session is currently recording o
   (( now - mtime < 20 ))
 }
 
-notify() {  # $1 = title, $2 = message, $3 = command to run on click (optional)
-  local args=(-title "$1" -message "$2" -sound default -group meeting-transcriber)
-  [[ -n "${3:-}" ]] && args+=(-execute "$3")
-  terminal-notifier "${args[@]}" >/dev/null 2>&1 || true
+notify() {  # $1 = title, $2 = message — best-effort banner (may be hidden by Focus/notification settings)
+  osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true
+}
+
+prompt_record() {  # modal dialog: 0 = Record clicked, 1 = Ignore/dismissed, 2 = timed out
+  local out
+  out=$(osascript -e 'display dialog "A meeting looks live. Record it?" with title "Meeting detected" buttons {"Ignore","Record"} default button "Record" giving up after 45' 2>/dev/null) || return 1
+  case "$out" in
+    *"gave up:true"*)          return 2 ;;
+    *"button returned:Record"*) return 0 ;;
+    *)                          return 1 ;;
+  esac
 }
 
 setup_session() {
@@ -373,7 +387,7 @@ transcribe() {  # $1 = session dir
 
 CMD="record"
 case "${1:-}" in
-  record|start|watch|watch-start|watch-install|watch-uninstall) CMD="$1"; shift ;;
+  record|start|watch|watch-start|watch-install|watch-uninstall|call-check|info) CMD="$1"; shift ;;
   transcribe)
     CMD="transcribe" ; shift
     TARGET="${1:-}" ; shift || true
@@ -411,6 +425,18 @@ if [[ "$CMD" == "ctl" ]]; then
   exit 0
 fi
 
+# ---------- helpers for external UIs (e.g. the meetingbar menu bar app) ----------
+
+if [[ "$CMD" == "call-check" ]]; then  # exit 0 if a call is live right now
+  call_active
+  exit $?
+fi
+
+if [[ "$CMD" == "info" ]]; then
+  echo "base_dir=$BASE_DIR"
+  exit 0
+fi
+
 # ---------- watch mode (meeting auto-detect) ----------
 
 if [[ "$CMD" == "watch-start" ]]; then  # click target of the watch notification
@@ -433,21 +459,36 @@ if [[ "$CMD" == "watch-start" ]]; then  # click target of the watch notification
 fi
 
 if [[ "$CMD" == "watch" ]]; then
-  command -v terminal-notifier >/dev/null || die "terminal-notifier not found (brew install terminal-notifier)."
-  PROMPTED=0 ; INACTIVE_POLLS=0
-  log "👀 Watching for a live call every ${WATCH_POLL_SEC}s (Zoom / Slack huddle / Meet tab)."
+  PROMPTED=0 ; INACTIVE_POLLS=0 ; TIMEOUTS=0
+  log "👀 Watching for a live call every ${WATCH_POLL_SEC}s (Zoom / Slack huddle / Meet)."
   while true; do
     if call_active; then
       INACTIVE_POLLS=0
       if [[ "$PROMPTED" == 0 ]] && ! recording_active; then
-        log "$(date '+%F %T') meeting detected — notifying"
-        notify "Meeting detected" "Click to record + transcribe this meeting." \
-          "$SCRIPT_DIR/meeting-record.sh watch-start"
-        PROMPTED=1   # one notification per call; dismissing it stays dismissed
+        log "$(date '+%F %T') meeting detected — prompting"
+        prompt_record ; rc=$?
+        if (( rc == 0 )); then
+          log "$(date '+%F %T') accepted — starting recorder"
+          "$SCRIPT_DIR/meeting-record.sh" watch-start
+          PROMPTED=1
+        elif (( rc == 2 )); then
+          # unanswered — the user may have missed it; retry a couple of times
+          TIMEOUTS=$((TIMEOUTS + 1))
+          if (( TIMEOUTS >= 3 )); then
+            log "$(date '+%F %T') dialog unanswered ${TIMEOUTS}x — giving up for this call"
+            PROMPTED=1
+          else
+            log "$(date '+%F %T') dialog unanswered — will retry in 2 min"
+            sleep 120
+          fi
+        else
+          log "$(date '+%F %T') declined"
+          PROMPTED=1   # explicit Ignore: stay quiet until this call ends
+        fi
       fi
     else
       INACTIVE_POLLS=$((INACTIVE_POLLS + 1))
-      (( INACTIVE_POLLS >= 3 )) && PROMPTED=0   # call over — re-arm for the next one
+      (( INACTIVE_POLLS >= 3 )) && { PROMPTED=0 ; TIMEOUTS=0 ; }  # call over — re-arm
     fi
     sleep "$WATCH_POLL_SEC"
   done
@@ -462,8 +503,16 @@ if [[ "$CMD" == "watch-install" || "$CMD" == "watch-uninstall" ]]; then
     log "Watcher launch agent removed."
     exit 0
   fi
-  command -v terminal-notifier >/dev/null || die "terminal-notifier not found (brew install terminal-notifier)."
   mkdir -p "$HOME/Library/LaunchAgents" "$BASE_DIR"
+  # Prefer the meetingbar menu bar app (build: swiftc -O -o meetingbar meetingbar.swift);
+  # fall back to the headless dialog watcher when it isn't built.
+  if [[ -x "$SCRIPT_DIR/meetingbar" ]]; then
+    PROG_ARGS="<string>$SCRIPT_DIR/meetingbar</string>"
+    WATCH_KIND="meetingbar menu bar app"
+  else
+    PROG_ARGS="<string>$SCRIPT_DIR/meeting-record.sh</string><string>watch</string>"
+    WATCH_KIND="headless watcher"
+  fi
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -471,10 +520,7 @@ if [[ "$CMD" == "watch-install" || "$CMD" == "watch-uninstall" ]]; then
 <dict>
   <key>Label</key><string>$LABEL</string>
   <key>ProgramArguments</key>
-  <array>
-    <string>$SCRIPT_DIR/meeting-record.sh</string>
-    <string>watch</string>
-  </array>
+  <array>$PROG_ARGS</array>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
   <key>StandardOutPath</key><string>$BASE_DIR/.watch.log</string>
@@ -488,7 +534,7 @@ if [[ "$CMD" == "watch-install" || "$CMD" == "watch-uninstall" ]]; then
 EOF
   launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
   launchctl bootstrap "gui/$(id -u)" "$PLIST" || die "launchctl bootstrap failed."
-  log "Watcher installed + running (launchd: $LABEL). Log: $BASE_DIR/.watch.log"
+  log "Watcher installed + running ($WATCH_KIND; launchd: $LABEL). Log: $BASE_DIR/.watch.log"
   log "Uninstall with: $0 watch-uninstall"
   exit 0
 fi

@@ -7,7 +7,7 @@ description: Full meeting workflow — record a live meeting (Meet/Zoom/Slack hu
 
 End-to-end meeting workflow using `meeting-record.sh` from the meeting-transcriber project (adjust `$REC` below to where you cloned it). Sessions live in `$MEETING_DIR/<date>_<name>/` (default `~/meetings`).
 
-The optional **meeting watcher** (`$REC watch-install`) may start recordings outside Claude Code: it detects a live call and posts a clickable macOS notification that launches the recorder daemon detached. Those sessions auto-end when the call closes and auto-transcribe in place (`AUTO_TRANSCRIBE=1` default) — so a session can be fully captured+transcribed without the agent involved, and the typical entry point here is just summarizing it.
+The optional **meeting watcher** (`$REC watch-install`; the `meetingbar` menu bar app when built, headless dialog watcher otherwise) may start recordings outside Claude Code: on detecting a live call it asks the user via a floating panel / dialog and launches the recorder daemon detached. Those sessions auto-end when the call closes and auto-transcribe in place (`AUTO_TRANSCRIBE=1` default) — so a session can be fully captured+transcribed without the agent involved, and the typical entry point here is just summarizing it.
 
 Decide the mode from the user's intent:
 

@@ -70,20 +70,23 @@ With neither, the recorder still works but is mic-only (fine on speakers in a qu
 
 On `end` (manual or auto), the daemon transcribes the session in place by default (`AUTO_TRANSCRIBE=1`): `<session>/state` gains `transcribe=running`, then `transcribe=done` (or `failed`; whisper output goes to `<session>/transcribe.log`). Set `AUTO_TRANSCRIBE=0` to get the old stop-only behavior.
 
-### Meeting watcher (auto-start)
+### Meeting watcher (auto-start) + menu bar app
 
 ```
-./meeting-record.sh watch-install    # install + start the launchd agent (runs at login)
-./meeting-record.sh watch            # or run the watcher in a terminal instead
+swiftc -O -o meetingbar meetingbar.swift   # build the menu bar app (recommended)
+./meeting-record.sh watch-install          # install + start at login (uses meetingbar if built)
 ./meeting-record.sh watch-uninstall
 ```
 
-Requires `brew install terminal-notifier` (clickable notifications). The watcher polls every `WATCH_POLL_SEC` (10s) for a live call using the same signals as auto-end: Zoom / Slack huddle UDP media flows, or a Chrome tab on an in-meeting `meet.google.com` URL. When a call appears and nothing is recording, it posts a **"Meeting detected"** notification — click it to start the recording daemon (a follow-up notification confirms recording actually started). One notification per call: dismissing it stays dismissed until that call ends.
+**meetingbar** (recommended) is a tiny always-on menu bar app: a 🎙 icon shows the recorder state and offers **Start Recording Now** manually. When it detects a live call and nothing is recording, a small floating panel appears at the top-right of the main display — **Record** starts the daemon, **Ignore** stays quiet until that call ends. While recording, the panel stays up with a red dot, elapsed time, and Stop/Pause; after stopping it shows transcription progress and a "transcript ready" confirmation. It's a thin UI over `meeting-record.sh` — all recording logic stays in the script.
+
+Without the binary, `watch-install` falls back to a headless watcher (`./meeting-record.sh watch`) that shows a native "Record it?" dialog instead. (Deliberately not a notification: notification CLIs like terminal-notifier are silently dropped on recent macOS.)
+
+Detection polls every `WATCH_POLL_SEC` (10s) for: Zoom / Slack huddle UDP media flows (QUIC `:443` traffic is excluded — Slack and Chrome hold those while idle), Chrome UDP media flows on Google Meet's `193xx` ports, or a Chrome tab on an in-meeting `meet.google.com` URL.
 
 Notes:
-- The first notification requires allowing notifications from `terminal-notifier` (macOS prompts once).
-- Recordings started this way run detached; their daemon output goes to `$MEETING_DIR/.watch-daemon.log`, the watcher's own log to `$MEETING_DIR/.watch.log`.
-- Meet detection needs the Automation-for-Chrome permission granted to the watcher's context; if the agent runs headless and the permission was never granted, Meet calls won't be detected (Zoom/Slack still are) — run `./meeting-record.sh watch` once in a terminal to trigger the prompt.
+- Recordings started this way run detached; daemon output goes to `$MEETING_DIR/.watch-daemon.log`, the watcher's own log to `$MEETING_DIR/.watch.log`.
+- The Meet tab check needs the Automation-for-Chrome permission in the watcher's context; the Meet media-port check needs no permissions and covers the in-call case regardless.
 - Meetings in apps/browsers other than Zoom, Slack, and Chrome-based Meet aren't detected.
 
 ### Auto-end (daemon mode)
