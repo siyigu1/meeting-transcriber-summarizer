@@ -21,5 +21,11 @@ MEETING_DIR="${MEETING_DIR:-$HOME/meetings}"
 #AUTO_END_SEC="${AUTO_END_SEC:-300}"
 #SILENCE_DB="${SILENCE_DB:--45}"
 
+# Daemon mode: transcribe in place after the recording ends (0 = off)
+#AUTO_TRANSCRIBE="${AUTO_TRANSCRIBE:-1}"
+
+# Watch mode: seconds between live-call checks
+#WATCH_POLL_SEC="${WATCH_POLL_SEC:-10}"
+
 # Context prompt passed to whisper (names/jargon that are often mis-transcribed)
 #WHISPER_PROMPT="${WHISPER_PROMPT:-}"

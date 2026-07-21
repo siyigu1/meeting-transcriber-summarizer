@@ -8,7 +8,8 @@ Record meetings (Google Meet, Zoom, Slack huddles, …) on a Mac and transcribe 
 - **Speaker labels** without any ML: `Me:` vs `Other:` — each stream is transcribed separately and merged by timestamp, so attribution is exact and cross-talk never loses a voice
 - Pause / resume / end controls — interactive keys in a terminal, or file-based control for driving it from scripts and agents
 - **Auto-end**: detects when the call closes (Zoom & Slack huddle media connections, Google Meet tabs), with a silence fallback
-- Transcribes with whisper.cpp `large-v3-turbo` (~5x realtime on Apple Silicon per stream, ~2.5x for a two-stream session; strong multilingual support), outputs Markdown
+- **Auto-start watcher** (optional): a launchd agent detects a meeting starting and posts a clickable macOS notification — one click and recording is running; combined with auto-end + auto-transcribe, the whole capture pipeline is hands-free
+- Transcribes with whisper.cpp `large-v3-turbo` (~5x realtime on Apple Silicon per stream, ~2.5x for a two-stream session; strong multilingual support), outputs Markdown — automatically after the recording ends in daemon mode
 
 ## Requirements
 
@@ -62,10 +63,28 @@ With neither, the recorder still works but is mic-only (fine on speakers in a qu
 ```
 ./meeting-record.sh start --name weekly-sync     # runs until told to stop
 ./meeting-record.sh ctl pause|resume|end|status  # control the running session
-./meeting-record.sh transcribe <session-dir>     # after `ctl end`, or to re-run
+./meeting-record.sh transcribe <session-dir>     # re-run, or if AUTO_TRANSCRIBE=0
 ```
 
 `ctl` targets the most recent session (tracked in `$MEETING_DIR/.current-session`); pass a session dir to target another. Live state is readable at `<session>/state`.
+
+On `end` (manual or auto), the daemon transcribes the session in place by default (`AUTO_TRANSCRIBE=1`): `<session>/state` gains `transcribe=running`, then `transcribe=done` (or `failed`; whisper output goes to `<session>/transcribe.log`). Set `AUTO_TRANSCRIBE=0` to get the old stop-only behavior.
+
+### Meeting watcher (auto-start)
+
+```
+./meeting-record.sh watch-install    # install + start the launchd agent (runs at login)
+./meeting-record.sh watch            # or run the watcher in a terminal instead
+./meeting-record.sh watch-uninstall
+```
+
+Requires `brew install terminal-notifier` (clickable notifications). The watcher polls every `WATCH_POLL_SEC` (10s) for a live call using the same signals as auto-end: Zoom / Slack huddle UDP media flows, or a Chrome tab on an in-meeting `meet.google.com` URL. When a call appears and nothing is recording, it posts a **"Meeting detected"** notification — click it to start the recording daemon (a follow-up notification confirms recording actually started). One notification per call: dismissing it stays dismissed until that call ends.
+
+Notes:
+- The first notification requires allowing notifications from `terminal-notifier` (macOS prompts once).
+- Recordings started this way run detached; their daemon output goes to `$MEETING_DIR/.watch-daemon.log`, the watcher's own log to `$MEETING_DIR/.watch.log`.
+- Meet detection needs the Automation-for-Chrome permission granted to the watcher's context; if the agent runs headless and the permission was never granted, Meet calls won't be detected (Zoom/Slack still are) — run `./meeting-record.sh watch` once in a terminal to trigger the prompt.
+- Meetings in apps/browsers other than Zoom, Slack, and Chrome-based Meet aren't detected.
 
 ### Auto-end (daemon mode)
 

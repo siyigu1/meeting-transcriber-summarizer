@@ -7,15 +7,24 @@ description: Full meeting workflow — record a live meeting (Meet/Zoom/Slack hu
 
 End-to-end meeting workflow using `meeting-record.sh` from the meeting-transcriber project (adjust `$REC` below to where you cloned it). Sessions live in `$MEETING_DIR/<date>_<name>/` (default `~/meetings`).
 
+The optional **meeting watcher** (`$REC watch-install`) may start recordings outside Claude Code: it detects a live call and posts a clickable macOS notification that launches the recorder daemon detached. Those sessions auto-end when the call closes and auto-transcribe in place (`AUTO_TRANSCRIBE=1` default) — so a session can be fully captured+transcribed without the agent involved, and the typical entry point here is just summarizing it.
+
 Decide the mode from the user's intent:
 
 - **"I'm in / starting a meeting", "record this meeting"** → Record (below)
 - **"pause" / "resume" / "how long so far?"** → send the matching control command
-- **"meeting is done", "end it"** → End: stop → transcribe → summarize, all in one go
+- **"meeting is done", "end it"** → End: stop → (auto-)transcribe → summarize, all in one go
 - **"summarize the meeting" (recording already done elsewhere)** → skip to Summarize
+- **No specific intent** → resolve from the latest session's state, in this order:
+  1. `status=recording|paused` → attach: report status and offer pause/resume/end control.
+  2. `status=ended` + `transcribe=running` → wait for it (until-loop on state), then Summarize.
+  3. `status=ended`, no `transcript.md` (or `transcribe=failed`) → run Transcribe, then Summarize.
+  4. `transcript.md` exists but no `notes.md` → Summarize immediately, no questions asked.
+  5. Everything already has notes → nothing pending; ask what the user wants.
 
 ## Record
 
+0. First check nothing is already recording (`$REC ctl status`) — the watcher may have beaten you to it. If `status=recording`, attach to that session instead of starting a second daemon.
 1. Start the daemon as a **background** Bash task (never foreground — it runs until told to end):
    ```
    $REC start --name <short-slug>
@@ -28,7 +37,7 @@ Decide the mode from the user's intent:
 
 The daemon ends itself when the call closes (Zoom/Slack UDP media flows gone, or no Chrome tab on an in-meeting `meet.google.com` URL; 60s grace) or after 5 min of continuous silence on all recorded streams.
 
-When the daemon background task completes WITHOUT the user having said "end": read `<session>/state` — `reason=call_closed` or `reason=silence` means auto-end. Tell the user the meeting end was detected (and why), then proceed directly to transcribe → summarize without waiting for input. Meet caveat: leaving a call but keeping the tab open is NOT detected — the silence fallback covers that.
+When the daemon background task completes WITHOUT the user having said "end": read `<session>/state` — `reason=call_closed` or `reason=silence` means auto-end. Tell the user the meeting end was detected (and why). By the time the daemon task completes, auto-transcription has already run inside it (check `transcribe=done|failed` in state), so proceed directly to Summarize without waiting for input. Meet caveat: leaving a call but keeping the tab open is NOT detected — the silence fallback covers that.
 
 ## Control (during recording)
 
@@ -38,13 +47,10 @@ When the daemon background task completes WITHOUT the user having said "end": re
 ## End → transcribe → summarize
 
 1. `$REC ctl end`, then confirm with `$REC ctl status` that `status=ended`.
-2. Transcribe as a **background** task (each channel is transcribed separately, so ~2.5x realtime overall — a 1h meeting ≈ 25 min; far too long for a foreground call):
-   ```
-   $REC transcribe <session-dir> --lang auto
-   ```
-   Tell the user transcription is running and roughly how long it will take (`recorded_seconds` / 2.5).
-3. Watch the task output for a `⚠️ … tracks diverged` warning — it means audio was dropped during capture (check `<session>/capture.log`) and transcript ordering may be off; tell the user if it appears.
-4. When the transcription task completes, verify `transcript.md` exists and is non-trivial, then continue to Summarize without waiting for further input.
+2. **The daemon transcribes by itself** (`AUTO_TRANSCRIBE=1`): state shows `transcribe=running`, then `transcribe=done|failed`. Do NOT also run `transcribe` — you'd double-transcribe. Just wait: if the daemon is a background task of this session, its completion is the signal; otherwise (watcher-started, detached) run a **background** until-loop on `<session>/state` for `transcribe=(done|failed)`. It's ~2.5x realtime (each channel transcribed separately) — a 1h meeting ≈ 25 min; tell the user the ETA (`recorded_seconds` / 2.5).
+3. Only run `$REC transcribe <session-dir> --lang auto` yourself (background task) if `transcribe=failed` (check `<session>/transcribe.log` first) or the state has no `transcribe=` line at all (AUTO_TRANSCRIBE was off).
+4. Check `<session>/transcribe.log` (or the task output) for a `⚠️ … tracks diverged` warning — it means audio was dropped during capture (check `<session>/capture.log`) and transcript ordering may be off; tell the user if it appears.
+5. When transcription completes, verify `transcript.md` exists and is non-trivial, then continue to Summarize without waiting for further input.
 
 ## Summarize
 

@@ -15,7 +15,17 @@
 #     ./meeting-record.sh ctl pause|resume|end|status [session-dir]
 #       Sends a command to the running daemon (defaults to the most recent session).
 #       Recording state is readable at <session>/state.
-#       `end` stops the daemon WITHOUT transcribing — run `transcribe` after.
+#       On `end` (or auto-end) the daemon transcribes in place when
+#       AUTO_TRANSCRIBE=1 (the default) — state gains transcribe=running|done|failed.
+#       With AUTO_TRANSCRIBE=0, run `transcribe` yourself afterwards.
+#
+#   WATCH (meeting auto-detect):
+#     ./meeting-record.sh watch
+#       Polls for a live call (Zoom / Slack huddle / Meet tab in Chrome). When one
+#       appears and nothing is recording, posts a macOS notification — clicking it
+#       starts the recording daemon. Requires: brew install terminal-notifier.
+#     ./meeting-record.sh watch-install | watch-uninstall
+#       Install/remove a launchd agent so the watcher runs at login.
 #
 #   TRANSCRIBE:
 #     ./meeting-record.sh transcribe <session-dir> [--lang zh|en|auto]
@@ -54,6 +64,8 @@ OTHER_LABEL="${OTHER_LABEL:-Other}"                # transcript label for meetin
 CALL_END_GRACE_SEC="${CALL_END_GRACE_SEC:-60}"  # call signal must be gone this long (0 = disable call detection)
 AUTO_END_SEC="${AUTO_END_SEC:-300}"             # silence fallback duration (0 = disable)
 SILENCE_DB="${SILENCE_DB:--45}"                 # dBFS; a stream quieter than this counts as silent
+AUTO_TRANSCRIBE="${AUTO_TRANSCRIBE:-1}"         # daemon mode: transcribe in place after the recording ends (0 = off)
+WATCH_POLL_SEC="${WATCH_POLL_SEC:-10}"          # watch mode: seconds between live-call checks
 LANG_OPT="auto"
 NAME=""
 
@@ -177,6 +189,22 @@ call_active() {  # true if a Zoom call, Slack huddle, or Google Meet tab is curr
       grep -qE 'meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}' && return 0
   fi
   return 1
+}
+
+recording_active() {  # true if the most recent session is currently recording or paused
+  local cur now mtime
+  cur=$(cat "$BASE_DIR/.current-session" 2>/dev/null) || return 1
+  [[ -n "$cur" && -f "$cur/state" ]] || return 1
+  grep -qE '^status=(recording|paused)$' "$cur/state" || return 1
+  # a live daemon rewrites state every second — a stale file means it died
+  now=$(date +%s) ; mtime=$(stat -f %m "$cur/state" 2>/dev/null || echo 0)
+  (( now - mtime < 20 ))
+}
+
+notify() {  # $1 = title, $2 = message, $3 = command to run on click (optional)
+  local args=(-title "$1" -message "$2" -sound default -group meeting-transcriber)
+  [[ -n "${3:-}" ]] && args+=(-execute "$3")
+  terminal-notifier "${args[@]}" >/dev/null 2>&1 || true
 }
 
 setup_session() {
@@ -345,7 +373,7 @@ transcribe() {  # $1 = session dir
 
 CMD="record"
 case "${1:-}" in
-  record|start) CMD="$1"; shift ;;
+  record|start|watch|watch-start|watch-install|watch-uninstall) CMD="$1"; shift ;;
   transcribe)
     CMD="transcribe" ; shift
     TARGET="${1:-}" ; shift || true
@@ -383,6 +411,88 @@ if [[ "$CMD" == "ctl" ]]; then
   exit 0
 fi
 
+# ---------- watch mode (meeting auto-detect) ----------
+
+if [[ "$CMD" == "watch-start" ]]; then  # click target of the watch notification
+  if recording_active; then
+    log "Recording already active — nothing to do."
+    exit 0
+  fi
+  mkdir -p "$BASE_DIR"
+  nohup "$SCRIPT_DIR/meeting-record.sh" start >> "$BASE_DIR/.watch-daemon.log" 2>&1 &
+  for _ in $(seq 1 12); do recording_active && break; sleep 1; done
+  if recording_active; then
+    notify "🔴 Recording started" "Auto-ends when the call closes; transcript follows automatically."
+    log "Recorder daemon launched (log: $BASE_DIR/.watch-daemon.log)"
+  else
+    notify "⚠️ Recording failed to start" "Check $BASE_DIR/.watch-daemon.log"
+    log "Recorder daemon did not reach recording state — see $BASE_DIR/.watch-daemon.log"
+    exit 1
+  fi
+  exit 0
+fi
+
+if [[ "$CMD" == "watch" ]]; then
+  command -v terminal-notifier >/dev/null || die "terminal-notifier not found (brew install terminal-notifier)."
+  PROMPTED=0 ; INACTIVE_POLLS=0
+  log "👀 Watching for a live call every ${WATCH_POLL_SEC}s (Zoom / Slack huddle / Meet tab)."
+  while true; do
+    if call_active; then
+      INACTIVE_POLLS=0
+      if [[ "$PROMPTED" == 0 ]] && ! recording_active; then
+        log "$(date '+%F %T') meeting detected — notifying"
+        notify "Meeting detected" "Click to record + transcribe this meeting." \
+          "$SCRIPT_DIR/meeting-record.sh watch-start"
+        PROMPTED=1   # one notification per call; dismissing it stays dismissed
+      fi
+    else
+      INACTIVE_POLLS=$((INACTIVE_POLLS + 1))
+      (( INACTIVE_POLLS >= 3 )) && PROMPTED=0   # call over — re-arm for the next one
+    fi
+    sleep "$WATCH_POLL_SEC"
+  done
+fi
+
+if [[ "$CMD" == "watch-install" || "$CMD" == "watch-uninstall" ]]; then
+  LABEL="local.meeting-transcriber.watch"
+  PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
+  if [[ "$CMD" == "watch-uninstall" ]]; then
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+    rm -f "$PLIST"
+    log "Watcher launch agent removed."
+    exit 0
+  fi
+  command -v terminal-notifier >/dev/null || die "terminal-notifier not found (brew install terminal-notifier)."
+  mkdir -p "$HOME/Library/LaunchAgents" "$BASE_DIR"
+  cat > "$PLIST" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>$LABEL</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>$SCRIPT_DIR/meeting-record.sh</string>
+    <string>watch</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>KeepAlive</key><true/>
+  <key>StandardOutPath</key><string>$BASE_DIR/.watch.log</string>
+  <key>StandardErrorPath</key><string>$BASE_DIR/.watch.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key><string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+</dict>
+</plist>
+EOF
+  launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null || true
+  launchctl bootstrap "gui/$(id -u)" "$PLIST" || die "launchctl bootstrap failed."
+  log "Watcher installed + running (launchd: $LABEL). Log: $BASE_DIR/.watch.log"
+  log "Uninstall with: $0 watch-uninstall"
+  exit 0
+fi
+
 # ---------- transcribe ----------
 
 if [[ "$CMD" == "transcribe" ]]; then
@@ -402,7 +512,19 @@ if [[ "$CMD" == "start" ]]; then
     END_REASON="${END_REASON:-manual}"
     write_state ended "$RECORDED"
     log "Ended (reason: $END_REASON). $(fmt_dur "$RECORDED") of audio in $SESSION"
-    log "Transcribe with: $0 transcribe $SESSION --lang $LANG_OPT"
+    if [[ "$AUTO_TRANSCRIBE" == 1 ]] && command -v whisper-cli >/dev/null && (( RECORDED > 0 )); then
+      echo "transcribe=running" >> "$SESSION/state"
+      log "Transcribing (auto, ~2.5x realtime)... log: $SESSION/transcribe.log"
+      if ( transcribe "$SESSION" ) >> "$SESSION/transcribe.log" 2>&1; then
+        write_state ended "$RECORDED" ; echo "transcribe=done" >> "$SESSION/state"
+        log "Transcript ready: $SESSION/transcript.md"
+      else
+        write_state ended "$RECORDED" ; echo "transcribe=failed" >> "$SESSION/state"
+        log "⚠️  Auto-transcription FAILED — see $SESSION/transcribe.log. Retry: $0 transcribe $SESSION"
+      fi
+    else
+      log "Transcribe with: $0 transcribe $SESSION --lang $LANG_OPT"
+    fi
     exit 0
   }
   trap daemon_stop INT TERM
