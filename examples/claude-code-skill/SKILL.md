@@ -38,18 +38,19 @@ When the daemon background task completes WITHOUT the user having said "end": re
 ## End → transcribe → summarize
 
 1. `$REC ctl end`, then confirm with `$REC ctl status` that `status=ended`.
-2. Transcribe as a **background** task (~5x realtime, so a 1h meeting ≈ 12 min — too long for a foreground call):
+2. Transcribe as a **background** task (each channel is transcribed separately, so ~2.5x realtime overall — a 1h meeting ≈ 25 min; far too long for a foreground call):
    ```
    $REC transcribe <session-dir> --lang auto
    ```
-   Tell the user transcription is running and roughly how long it will take (`recorded_seconds` / 5).
-3. When the transcription task completes, verify `transcript.md` exists and is non-trivial, then continue to Summarize without waiting for further input.
+   Tell the user transcription is running and roughly how long it will take (`recorded_seconds` / 2.5).
+3. Watch the task output for a `⚠️ … tracks diverged` warning — it means audio was dropped during capture (check `<session>/capture.log`) and transcript ordering may be off; tell the user if it appears.
+4. When the transcription task completes, verify `transcript.md` exists and is non-trivial, then continue to Summarize without waiting for further input.
 
 ## Summarize
 
 1. Session dir: whatever was just transcribed; or the path the user gave; or the most recent session folder. Confirm with the user only if ambiguous.
 2. Read `transcript.md` fully (chunked if long). `transcript.segments.md` has per-line timestamps — consult it for timelines/ordering.
-3. Speaker labels: when the session had both streams, lines are labeled `Me:` (the user's mic) and `Other:` (meeting audio = ALL remote participants lumped together — distinguish among them by context/names, don't guess). Mic-only sessions are unlabeled; infer speakers from context. Normalize obvious mis-transcriptions of names and domain jargon from context.
+3. Speaker labels: when the session had both streams, each channel is transcribed separately, so labels are exact: `Me:` (the user's mic) and `Other:` (meeting audio = ALL remote participants lumped together — distinguish among them by context/names, don't guess). If the user's voice echoes back through the meeting audio, the same words can appear under both labels at overlapping timestamps — treat those as one utterance by `Me`, not a repeat. Mic-only sessions are unlabeled; infer speakers from context. Normalize obvious mis-transcriptions of names and domain jargon from context.
 4. Write notes to `notes.md` in the session dir AND show them in the conversation. In the notes header, link the transcript: `**Full transcript:** [[transcript]] · [[transcript.segments|with timestamps]] · audio: \`full.wav\``.
 
 **Notes format:**

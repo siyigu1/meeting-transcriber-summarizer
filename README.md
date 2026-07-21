@@ -5,10 +5,10 @@ Record meetings (Google Meet, Zoom, Slack huddles, …) on a Mac and transcribe 
 **Features**
 
 - Records **both sides** of a call: your mic + the meeting audio, as separate streams — meeting audio via a native Core Audio system tap (no virtual devices, no output re-routing, works with headphones), with BlackHole as a fallback for older macOS
-- **Speaker labels** without any ML: `Me:` vs `Other:`, attributed by comparing per-segment energy between the two streams
+- **Speaker labels** without any ML: `Me:` vs `Other:` — each stream is transcribed separately and merged by timestamp, so attribution is exact and cross-talk never loses a voice
 - Pause / resume / end controls — interactive keys in a terminal, or file-based control for driving it from scripts and agents
 - **Auto-end**: detects when the call closes (Zoom & Slack huddle media connections, Google Meet tabs), with a silence fallback
-- Transcribes with whisper.cpp `large-v3-turbo` (~5x realtime on Apple Silicon, strong multilingual support), outputs Markdown
+- Transcribes with whisper.cpp `large-v3-turbo` (~5x realtime on Apple Silicon per stream, ~2.5x for a two-stream session; strong multilingual support), outputs Markdown
 
 ## Requirements
 
@@ -91,8 +91,11 @@ Each session is a folder, `$MEETING_DIR/<timestamp>_<name>/`:
 
 - `transcript.segments.md` — the same lines with timestamps
 - `full.wav` — the mixed audio; `seg-*.wav` — raw per-stream segments
+- `capture.log` — ffmpeg/audiotap capture diagnostics
 
-Speaker attribution works because your voice lives only on the mic stream and remote voices live only on the loopback stream — each whisper segment is labeled by whichever stream is louder in that window. All remote participants share the `Other` label. Mic-only recordings are unlabeled.
+Speaker attribution works because your voice lives only on the mic stream and remote voices live only on the loopback stream — each stream is transcribed separately (segments that whisper hallucinates over silence are dropped by an energy check) and the two segment lists are merged by timestamp. All remote participants share the `Other` label. If your voice echoes back through the meeting audio, the same words can show up on both channels at the same timestamps. Mic-only recordings are transcribed as a single stream and unlabeled.
+
+The recorder pads any capture-buffer gaps with silence (`aresample=async=1`) so the two streams can't drift out of sync; if they still diverge by more than a few seconds, the recorder and transcriber print a `⚠️ tracks diverged` warning.
 
 ## Configuration
 

@@ -23,6 +23,7 @@
 # Output: $MEETING_DIR/<timestamp>_<name>/  (default ~/meetings)
 #   seg-*.wav                 raw audio segments (mic / sys)
 #   full.wav                  mixed + concatenated audio
+#   capture.log               ffmpeg/audiotap capture diagnostics (frame drops etc.)
 #   transcript.md             speaker-labeled transcript (markdown)
 #   transcript.segments.md    same, with timestamps
 #
@@ -75,27 +76,58 @@ fmt_dur() { printf '%dm%02ds' $(($1/60)) $(($1%60)); }
 start_segment() {  # spawns ffmpeg recorders for segment $SEG
   local tag
   tag=$(printf 'seg-%03d' "$SEG")
-  ffmpeg -hide_banner -loglevel error -f avfoundation -i ":${MIC_IDX}" \
-    -ac 1 -ar 16000 -c:a pcm_s16le "$SESSION/${tag}-mic.wav" &
+  # aresample=async=1 pads timestamp gaps with silence: without it, dropped
+  # capture buffers silently shorten the track and drift it out of sync with
+  # the system stream. Capture diagnostics go to capture.log.
+  ffmpeg -hide_banner -loglevel warning -f avfoundation -i ":${MIC_IDX}" \
+    -af "aresample=async=1" \
+    -ac 1 -ar 16000 -c:a pcm_s16le "$SESSION/${tag}-mic.wav" 2>>"$SESSION/capture.log" &
   MIC_PID=$!
   case "$SYS_MODE" in
     tap)
-      "$SCRIPT_DIR/audiotap" "$SESSION/${tag}-sys.wav" 2>/dev/null &
+      "$SCRIPT_DIR/audiotap" "$SESSION/${tag}-sys.wav" 2>>"$SESSION/capture.log" &
       SYS_PID=$! ;;
     blackhole)
-      ffmpeg -hide_banner -loglevel error -f avfoundation -i ":${SYS_IDX}" \
-        -ac 1 -ar 16000 -c:a pcm_s16le "$SESSION/${tag}-sys.wav" &
+      ffmpeg -hide_banner -loglevel warning -f avfoundation -i ":${SYS_IDX}" \
+        -af "aresample=async=1" \
+        -ac 1 -ar 16000 -c:a pcm_s16le "$SESSION/${tag}-sys.wav" 2>>"$SESSION/capture.log" &
       SYS_PID=$! ;;
   esac
   SEG_START=$SECONDS
 }
 
+wav_dur() { ffprobe -v error -show_entries format=duration -of csv=p=0 "$1" 2>/dev/null; }
+
+check_segment_sync() {  # $1 = segment tag; warn if mic and sys tracks diverged
+  local micf="$SESSION/$1-mic.wav" sysf="$SESSION/$1-sys.wav" md sd
+  [[ -s "$micf" && -s "$sysf" ]] || return 0
+  md=$(wav_dur "$micf") ; sd=$(wav_dur "$sysf")
+  [[ -n "$md" && -n "$sd" ]] || return 0
+  if awk -v a="$md" -v b="$sd" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d>3)}'; then
+    log "⚠️  $1: mic (${md%.*}s) and system (${sd%.*}s) tracks diverged — audio was dropped during capture; check capture.log. Transcript alignment may suffer."
+  fi
+}
+
+wait_or_kill() {  # $1 = pid (SIGINT already sent) — escalate so a stalled capture can't hang the daemon
+  local pid="$1" i
+  [[ -n "$pid" ]] || return 0
+  for i in $(seq 1 80); do kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 0; }; sleep 0.1; done
+  kill -TERM "$pid" 2>/dev/null
+  for i in $(seq 1 30); do kill -0 "$pid" 2>/dev/null || { wait "$pid" 2>/dev/null; return 0; }; sleep 0.1; done
+  kill -KILL "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  log "⚠️  capture process $pid had to be force-killed — its last segment may be truncated (see capture.log)."
+}
+
 stop_segment() {  # SIGINT lets ffmpeg finalize the wav header cleanly
+  local tag
+  tag=$(printf 'seg-%03d' "$SEG")
   [[ -n "${MIC_PID:-}" ]] && kill -INT "$MIC_PID" 2>/dev/null
   [[ -n "${SYS_PID:-}" ]] && kill -INT "$SYS_PID" 2>/dev/null
-  wait "${MIC_PID:-}" 2>/dev/null
-  [[ -n "${SYS_PID:-}" ]] && wait "$SYS_PID" 2>/dev/null
+  wait_or_kill "${MIC_PID:-}"
+  wait_or_kill "${SYS_PID:-}"
   MIC_PID="" ; SYS_PID=""
+  check_segment_sync "$tag"
   RECORDED=$((RECORDED + SECONDS - SEG_START))
   SEG=$((SEG + 1))
 }
@@ -195,13 +227,18 @@ transcribe() {  # $1 = session dir
   log "Mixing segments..."
   local concat_list="$dir/concat.txt" mic_list="$dir/.mic.txt" sys_list="$dir/.sys.txt"
   : > "$concat_list" ; : > "$mic_list" ; : > "$sys_list"
-  local mic sys out found=0 diarize=1 mixdur base micp sysp
+  local mic sys out found=0 diarize=1 mixdur base micp sysp micd sysd
   for mic in "$dir"/seg-*-mic.wav; do
     [[ -e "$mic" ]] || continue
     found=1
     sys="${mic%-mic.wav}-sys.wav"
     out="${mic%-mic.wav}-mixed.wav"
     if [[ -s "$sys" ]]; then
+      micd=$(wav_dur "$mic") ; sysd=$(wav_dur "$sys")
+      if [[ -n "$micd" && -n "$sysd" ]] &&
+         awk -v a="$micd" -v b="$sysd" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d>3)}'; then
+        log "⚠️  $(basename "${mic%-mic.wav}"): mic (${micd%.*}s) and system (${sysd%.*}s) tracks diverged — audio was dropped during capture; transcript alignment may suffer."
+      fi
       ffmpeg -hide_banner -loglevel error -y -i "$mic" -i "$sys" \
         -filter_complex "amix=inputs=2:duration=longest:normalize=0" \
         -ac 1 -ar 16000 -c:a pcm_s16le "$out" || cp "$mic" "$out"
@@ -234,31 +271,48 @@ transcribe() {  # $1 = session dir
   fi
   rm -f "$dir"/seg-*-mixed.wav "$dir"/.seg-*pad.wav "$concat_list" "$mic_list" "$sys_list"
 
-  log "Transcribing with whisper.cpp (large-v3-turbo, lang=$LANG_OPT)... this runs ~5x realtime."
   local extra=()
   [[ -n "${WHISPER_PROMPT:-}" ]] && extra+=(--prompt "$WHISPER_PROMPT")
-  whisper-cli -m "$MODEL" -f "$dir/full.wav" -l "$LANG_OPT" \
-    -otxt -of "$dir/transcript" --print-progress ${extra[@]+"${extra[@]}"} > "$dir/.segments.raw" \
-    || die "whisper-cli failed."
 
   # markdown outputs so Obsidian picks them up
   local title
   title=$(basename "$dir")
   if [[ "$diarize" == 1 ]]; then
-    log "Labeling speakers (mic vs system energy per segment)..."
-    local line ts te text t0 dur micdb sysdb who prev=""
+    # Transcribe each channel separately: a single mixed-stream pass can only
+    # keep one voice wherever speech overlaps, so cross-talk (or drifted
+    # tracks) silently loses words. Per-channel also makes speaker labels
+    # exact instead of an energy-based guess.
+    log "Transcribing each channel with whisper.cpp (large-v3-turbo, lang=$LANG_OPT)... ~2.5x realtime."
+    whisper-cli -m "$MODEL" -f "$dir/.mic-full.wav" -l "$LANG_OPT" \
+      --print-progress ${extra[@]+"${extra[@]}"} > "$dir/.mic-segments.raw" \
+      || die "whisper-cli failed (mic channel)."
+    whisper-cli -m "$MODEL" -f "$dir/.sys-full.wav" -l "$LANG_OPT" \
+      --print-progress ${extra[@]+"${extra[@]}"} > "$dir/.sys-segments.raw" \
+      || die "whisper-cli failed (system channel)."
+
+    log "Merging channels by timestamp..."
+    local merged="$dir/.merged.tsv" ch src who line ts te text t0 dur db prev=""
+    : > "$merged"
+    for ch in mic sys; do
+      src="$dir/.$ch-full.wav"
+      [[ "$ch" == mic ]] && who="$ME_LABEL" || who="$OTHER_LABEL"
+      while IFS= read -r line; do
+        ts="${line:1:12}" ; te="${line:18:12}" ; text="${line:31}"
+        text="${text#"${text%%[![:space:]]*}"}"   # ltrim
+        [[ -z "$text" ]] && continue
+        t0=$(to_sec "$ts")
+        dur=$(awk -v a="$t0" -v b="$(to_sec "$te")" 'BEGIN{d=b-a; if(d<0.3)d=0.3; printf "%.3f", d}')
+        # drop whisper hallucinations over silence: no energy on this channel here
+        db=$(win_db "$src" "$t0" "$dur")
+        awk -v v="$db" -v t="$SILENCE_DB" 'BEGIN{exit !(v < t)}' && continue
+        printf '%s\t%s\t%s\t%s\t%s\n' "$t0" "$ts" "$te" "$who" "$text" >> "$merged"
+      done < <(grep '^\[' "$dir/.$ch-segments.raw")
+    done
+    sort -n -o "$merged" "$merged"
+
     { echo "# Transcript — $title" ; echo ; } > "$dir/transcript.md"
     { echo "# Transcript (timestamped) — $title" ; echo ; echo '```' ; } > "$dir/transcript.segments.md"
-    while IFS= read -r line; do
-      ts="${line:1:12}" ; te="${line:18:12}" ; text="${line:31}"
-      text="${text#"${text%%[![:space:]]*}"}"   # ltrim
-      [[ -z "$text" ]] && continue
-      t0=$(to_sec "$ts")
-      dur=$(awk -v a="$t0" -v b="$(to_sec "$te")" 'BEGIN{d=b-a; if(d<0.3)d=0.3; printf "%.3f", d}')
-      micdb=$(win_db "$dir/.mic-full.wav" "$t0" "$dur")
-      sysdb=$(win_db "$dir/.sys-full.wav" "$t0" "$dur")
-      who=$(awk -v m="$micdb" -v s="$sysdb" -v me="$ME_LABEL" -v other="$OTHER_LABEL" \
-        'BEGIN{print (m>=s) ? me : other}')
+    while IFS=$'\t' read -r t0 ts te who text; do
       if [[ "$who" != "$prev" ]]; then
         printf '\n**%s:** %s\n' "$who" "$text" >> "$dir/transcript.md"
         prev="$who"
@@ -266,15 +320,21 @@ transcribe() {  # $1 = session dir
         printf '%s\n' "$text" >> "$dir/transcript.md"
       fi
       printf '[%s --> %s]  %s: %s\n' "$ts" "$te" "$who" "$text" >> "$dir/transcript.segments.md"
-    done < <(grep '^\[' "$dir/.segments.raw")
+    done < "$merged"
     echo '```' >> "$dir/transcript.segments.md"
     log "Speaker labels: $ME_LABEL = your mic; $OTHER_LABEL = meeting audio (all remote participants)."
+    log "(If your voice echoes through the meeting audio, it may appear on both channels at the same timestamps.)"
   else
+    log "Transcribing with whisper.cpp (large-v3-turbo, lang=$LANG_OPT)... ~5x realtime."
+    whisper-cli -m "$MODEL" -f "$dir/full.wav" -l "$LANG_OPT" \
+      -otxt -of "$dir/transcript" --print-progress ${extra[@]+"${extra[@]}"} > "$dir/.segments.raw" \
+      || die "whisper-cli failed."
     { echo "# Transcript — $title" ; echo ; cat "$dir/transcript.txt" ; } > "$dir/transcript.md"
     { echo "# Transcript (timestamped) — $title" ; echo ; echo '```' ; grep '^\[' "$dir/.segments.raw" ; echo '```' ; } > "$dir/transcript.segments.md"
     log "No system-audio stream — transcript is unlabeled (speaker attribution needs BlackHole)."
   fi
-  rm -f "$dir/transcript.txt" "$dir/.segments.raw" "$dir/.mic-full.wav" "$dir/.sys-full.wav"
+  rm -f "$dir/transcript.txt" "$dir/.segments.raw" "$dir/.mic-segments.raw" "$dir/.sys-segments.raw" \
+    "$dir/.merged.tsv" "$dir/.mic-full.wav" "$dir/.sys-full.wav"
 
   log ""
   log "Done. Transcript: $dir/transcript.md"
