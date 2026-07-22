@@ -53,6 +53,7 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 BASE_DIR="${MEETING_DIR:-$HOME/meetings}"
 MODEL="${WHISPER_MODEL:-$SCRIPT_DIR/models/ggml-large-v3-turbo.bin}"
+VAD_MODEL="${VAD_MODEL:-$SCRIPT_DIR/models/ggml-silero-v5.1.2.bin}"  # optional; enables VAD when present
 MIC_NAME="${MIC_DEVICE:-default}"                  # "default" = system default input; follows your headset's mic.
                                                    # A fixed name (e.g. "MacBook Pro Microphone") would only catch
                                                    # muffled room audio when a headset mic is active.
@@ -223,14 +224,45 @@ prompt_record() {  # modal dialog: 0 = Record clicked, 1 = Ignore/dismissed, 2 =
   esac
 }
 
+default_input_info() {  # prints "transport<TAB>name" of the system default input
+  local sp tr nm
+  sp=$(system_profiler SPAudioDataType 2>/dev/null)
+  tr=$(printf '%s\n' "$sp" | grep -A10 'Default Input Device: Yes' | sed -n 's/^ *Transport: //p' | head -1)
+  nm=$(printf '%s\n' "$sp" | grep -B4 'Default Input Device: Yes' | sed -n 's/^        \([^ ].*\):$/\1/p' | head -1)
+  printf '%s\t%s\n' "$tr" "$nm"
+}
+
+builtin_input_name() {  # first built-in device that has input channels
+  # note: awk `exit` still runs END, so guard with `done` to avoid a double print
+  system_profiler SPAudioDataType 2>/dev/null | awk -F': ' '
+    /^        [^ ].*:$/ {if (inch > 0 && tr == "Built-in") {print name; done=1; exit}
+                         name=$0; sub(/^ +/,"",name); sub(/:$/,"",name); inch=0; tr=""}
+    /Input Channels/ {inch=$2+0}
+    /Transport/ {tr=$2}
+    END {if (!done && inch > 0 && tr == "Built-in") print name}'
+}
+
 setup_session() {
   command -v ffmpeg >/dev/null || die "ffmpeg not found."
   if [[ "$MIC_NAME" == "default" ]]; then
-    MIC_IDX="default"   # avfoundation resolves the system default input at start
-    local defname
-    defname=$(system_profiler SPAudioDataType 2>/dev/null |
-      awk '/^        [A-Za-z]/{name=$0} /Default Input Device: Yes/{gsub(/^ +|:*$/,"",name); print name; exit}')
-    MIC_DESC="default input${defname:+ ($defname)}"
+    local info transport defname bname
+    info=$(default_input_info)
+    transport="${info%%$'\t'*}" ; defname="${info#*$'\t'}"
+    MIC_IDX=""
+    # Bluetooth (HFP) mics fragment badly when a second client reads them while
+    # the call app holds them — prefer the built-in mic's room pickup instead.
+    # Set BT_MIC_OK=1 to record the Bluetooth mic anyway.
+    if [[ "$transport" == "Bluetooth" && "${BT_MIC_OK:-0}" != 1 ]]; then
+      bname=$(builtin_input_name)
+      if [[ -n "$bname" ]]; then
+        MIC_IDX=$(device_index "$bname")
+        [[ -n "$MIC_IDX" ]] && MIC_DESC="[$MIC_IDX] $bname (default input '$defname' is Bluetooth — using built-in mic)"
+      fi
+    fi
+    if [[ -z "$MIC_IDX" ]]; then
+      MIC_IDX="default"   # avfoundation resolves the system default input at start
+      MIC_DESC="default input${defname:+ ($defname)}"
+    fi
   else
     MIC_IDX=$(device_index "$MIC_NAME")
     [[ -n "$MIC_IDX" ]] || die "Mic device '$MIC_NAME' not found. Devices:
@@ -338,6 +370,12 @@ transcribe() {  # $1 = session dir
 
   local extra=()
   [[ -n "${WHISPER_PROMPT:-}" ]] && extra+=(--prompt "$WHISPER_PROMPT")
+  # -mc 0: don't carry text context between windows — context carry turns one
+  # repeated phrase into a file-wide hallucination loop on gappy audio.
+  # VAD: decode only detected speech, so silence/noise stretches never reach the
+  # model (timestamps stay aligned to the original file).
+  extra+=(-mc 0)
+  [[ -f "$VAD_MODEL" ]] && extra+=(--vad --vad-model "$VAD_MODEL")
 
   # markdown outputs so Obsidian picks them up
   local title

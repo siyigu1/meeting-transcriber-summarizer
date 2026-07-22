@@ -11,9 +11,16 @@ MEETING_DIR="${MEETING_DIR:-$HOME/meetings}"
 # Mic: "default" (recommended) records the system default input, which follows
 # your headset's mic. A fixed device name (as shown by
 # `ffmpeg -f avfoundation -list_devices true -i ""`) would only catch muffled
-# room audio when a headset mic is active.
+# room audio when a headset mic is active. Exception: when the default input is
+# a Bluetooth (HFP) mic, the recorder uses the built-in mic instead — a second
+# reader on an in-call Bluetooth mic gets badly fragmented audio.
 #MIC_DEVICE="${MIC_DEVICE:-default}"
+#BT_MIC_OK="${BT_MIC_OK:-0}"     # 1 = record a Bluetooth default mic anyway
 #SYS_DEVICE="${SYS_DEVICE:-BlackHole 2ch}"
+
+# Optional VAD model (strongly recommended; see README) — enables voice activity
+# detection so silence never reaches whisper
+#VAD_MODEL="${VAD_MODEL:-models/ggml-silero-v5.1.2.bin}"
 
 # Speaker labels in transcripts
 #ME_LABEL="${ME_LABEL:-Me}"

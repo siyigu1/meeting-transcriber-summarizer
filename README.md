@@ -20,6 +20,11 @@ Record meetings (Google Meet, Zoom, Slack huddles, …) on a Mac and transcribe 
   curl -L -o models/ggml-large-v3-turbo.bin \
     https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-large-v3-turbo.bin
   ```
+- The silero VAD model (~1 MB, strongly recommended — without it, quiet or choppy stretches send whisper into repetition-loop hallucinations):
+  ```
+  curl -L -o models/ggml-silero-v5.1.2.bin \
+    https://huggingface.co/ggml-org/whisper-vad/resolve/main/ggml-silero-v5.1.2.bin
+  ```
 - Your terminal needs Microphone permission (System Settings → Privacy & Security → Microphone); macOS prompts on first recording.
 
 ### System audio (one-time)
@@ -122,6 +127,8 @@ The recorder pads any capture-buffer gaps with silence (`aresample=async=1`) so 
 ## Configuration
 
 Environment variables, or a `config.local` file next to the script (gitignored) — copy `config.example`. Main knobs: `MEETING_DIR`, `MIC_DEVICE`, `SYS_DEVICE`, `ME_LABEL`/`OTHER_LABEL`, auto-end tuning, and `WHISPER_PROMPT` (a context prompt with names/jargon whisper tends to mis-hear).
+
+**Bluetooth headset mics:** `MIC_DEVICE=default` follows the system default input — but when that default is a Bluetooth (HFP) mic held by the call app, a second reader gets badly fragmented audio. The recorder therefore falls back to the built-in mic's room pickup automatically in that case (the startup line says so); set `BT_MIC_OK=1` to record the Bluetooth mic anyway.
 
 Transcription language is auto-detected; force it with `--lang zh`, `--lang en`, etc.
 
