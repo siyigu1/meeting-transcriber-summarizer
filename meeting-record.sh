@@ -53,7 +53,9 @@ SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
 
 BASE_DIR="${MEETING_DIR:-$HOME/meetings}"
 MODEL="${WHISPER_MODEL:-$SCRIPT_DIR/models/ggml-large-v3-turbo.bin}"
-MIC_NAME="${MIC_DEVICE:-MacBook Pro Microphone}"   # always hears you, even with headphones on
+MIC_NAME="${MIC_DEVICE:-default}"                  # "default" = system default input; follows your headset's mic.
+                                                   # A fixed name (e.g. "MacBook Pro Microphone") would only catch
+                                                   # muffled room audio when a headset mic is active.
 SYS_NAME="${SYS_DEVICE:-BlackHole 2ch}"            # loopback of system output (Meet/Zoom audio)
 ME_LABEL="${ME_LABEL:-Me}"                         # transcript label for your mic
 OTHER_LABEL="${OTHER_LABEL:-Other}"                # transcript label for meeting audio
@@ -223,9 +225,18 @@ prompt_record() {  # modal dialog: 0 = Record clicked, 1 = Ignore/dismissed, 2 =
 
 setup_session() {
   command -v ffmpeg >/dev/null || die "ffmpeg not found."
-  MIC_IDX=$(device_index "$MIC_NAME")
-  [[ -n "$MIC_IDX" ]] || die "Mic device '$MIC_NAME' not found. Devices:
+  if [[ "$MIC_NAME" == "default" ]]; then
+    MIC_IDX="default"   # avfoundation resolves the system default input at start
+    local defname
+    defname=$(system_profiler SPAudioDataType 2>/dev/null |
+      awk '/^        [A-Za-z]/{name=$0} /Default Input Device: Yes/{gsub(/^ +|:*$/,"",name); print name; exit}')
+    MIC_DESC="default input${defname:+ ($defname)}"
+  else
+    MIC_IDX=$(device_index "$MIC_NAME")
+    [[ -n "$MIC_IDX" ]] || die "Mic device '$MIC_NAME' not found. Devices:
 $(list_devices)"
+    MIC_DESC="[$MIC_IDX] $MIC_NAME"
+  fi
   local stamp
   stamp=$(date +%Y-%m-%d_%H%M)
   SESSION="$BASE_DIR/${stamp}${NAME:+_$NAME}"
@@ -311,6 +322,18 @@ transcribe() {  # $1 = session dir
     ffmpeg -hide_banner -loglevel error -y -f concat -safe 0 -i "$sys_list" -c copy "$dir/.sys-full.wav" ||
       diarize=0
   fi
+  # Normalized copies for whisper: quiet speech (headset mic, soft speakers) below
+  # whisper's comfort level degrades into hallucination loops. speechnorm keeps
+  # duration/timestamps identical; energy checks still use the ORIGINAL files.
+  local norm="speechnorm=e=12.5:r=0.0001:l=1"
+  if [[ "$diarize" == 1 ]]; then
+    ffmpeg -hide_banner -loglevel error -y -i "$dir/.mic-full.wav" -af "$norm" "$dir/.mic-full-norm.wav" &&
+    ffmpeg -hide_banner -loglevel error -y -i "$dir/.sys-full.wav" -af "$norm" "$dir/.sys-full-norm.wav" ||
+      { cp "$dir/.mic-full.wav" "$dir/.mic-full-norm.wav"; cp "$dir/.sys-full.wav" "$dir/.sys-full-norm.wav"; }
+  else
+    ffmpeg -hide_banner -loglevel error -y -i "$dir/full.wav" -af "$norm" "$dir/.full-norm.wav" ||
+      cp "$dir/full.wav" "$dir/.full-norm.wav"
+  fi
   rm -f "$dir"/seg-*-mixed.wav "$dir"/.seg-*pad.wav "$concat_list" "$mic_list" "$sys_list"
 
   local extra=()
@@ -325,14 +348,18 @@ transcribe() {  # $1 = session dir
     # tracks) silently loses words. Per-channel also makes speaker labels
     # exact instead of an energy-based guess.
     log "Transcribing each channel with whisper.cpp (large-v3-turbo, lang=$LANG_OPT)... ~2.5x realtime."
-    whisper-cli -m "$MODEL" -f "$dir/.mic-full.wav" -l "$LANG_OPT" \
+    whisper-cli -m "$MODEL" -f "$dir/.mic-full-norm.wav" -l "$LANG_OPT" \
       --print-progress ${extra[@]+"${extra[@]}"} > "$dir/.mic-segments.raw" \
       || die "whisper-cli failed (mic channel)."
-    whisper-cli -m "$MODEL" -f "$dir/.sys-full.wav" -l "$LANG_OPT" \
+    whisper-cli -m "$MODEL" -f "$dir/.sys-full-norm.wav" -l "$LANG_OPT" \
       --print-progress ${extra[@]+"${extra[@]}"} > "$dir/.sys-segments.raw" \
       || die "whisper-cli failed (system channel)."
 
     log "Merging channels by timestamp..."
+    # Hallucination filter runs on the ORIGINAL (un-normalized) audio, and 10 dB
+    # below the silence threshold: quiet-but-real speech (headset mics often sit
+    # near SILENCE_DB) must survive; only truly dead air drops segments.
+    local halluc_db=$((SILENCE_DB - 10))
     local merged="$dir/.merged.tsv" ch src who line ts te text t0 dur db prev=""
     : > "$merged"
     for ch in mic sys; do
@@ -346,7 +373,7 @@ transcribe() {  # $1 = session dir
         dur=$(awk -v a="$t0" -v b="$(to_sec "$te")" 'BEGIN{d=b-a; if(d<0.3)d=0.3; printf "%.3f", d}')
         # drop whisper hallucinations over silence: no energy on this channel here
         db=$(win_db "$src" "$t0" "$dur")
-        awk -v v="$db" -v t="$SILENCE_DB" 'BEGIN{exit !(v < t)}' && continue
+        awk -v v="$db" -v t="$halluc_db" 'BEGIN{exit !(v < t)}' && continue
         printf '%s\t%s\t%s\t%s\t%s\n' "$t0" "$ts" "$te" "$who" "$text" >> "$merged"
       done < <(grep '^\[' "$dir/.$ch-segments.raw")
     done
@@ -368,7 +395,7 @@ transcribe() {  # $1 = session dir
     log "(If your voice echoes through the meeting audio, it may appear on both channels at the same timestamps.)"
   else
     log "Transcribing with whisper.cpp (large-v3-turbo, lang=$LANG_OPT)... ~5x realtime."
-    whisper-cli -m "$MODEL" -f "$dir/full.wav" -l "$LANG_OPT" \
+    whisper-cli -m "$MODEL" -f "$dir/.full-norm.wav" -l "$LANG_OPT" \
       -otxt -of "$dir/transcript" --print-progress ${extra[@]+"${extra[@]}"} > "$dir/.segments.raw" \
       || die "whisper-cli failed."
     { echo "# Transcript — $title" ; echo ; cat "$dir/transcript.txt" ; } > "$dir/transcript.md"
@@ -376,7 +403,8 @@ transcribe() {  # $1 = session dir
     log "No system-audio stream — transcript is unlabeled (speaker attribution needs BlackHole)."
   fi
   rm -f "$dir/transcript.txt" "$dir/.segments.raw" "$dir/.mic-segments.raw" "$dir/.sys-segments.raw" \
-    "$dir/.merged.tsv" "$dir/.mic-full.wav" "$dir/.sys-full.wav"
+    "$dir/.merged.tsv" "$dir/.mic-full.wav" "$dir/.sys-full.wav" \
+    "$dir/.mic-full-norm.wav" "$dir/.sys-full-norm.wav" "$dir/.full-norm.wav"
 
   log ""
   log "Done. Transcript: $dir/transcript.md"
@@ -575,7 +603,7 @@ if [[ "$CMD" == "start" ]]; then
   }
   trap daemon_stop INT TERM
   log "🔴 Recording (daemon) to $SESSION"
-  log "   mic: [$MIC_IDX] $MIC_NAME ${SYS_DESC:+ |  $SYS_DESC}"
+  log "   mic: $MIC_DESC ${SYS_DESC:+ |  $SYS_DESC}"
   log "   Control with: $0 ctl pause|resume|end|status"
   log "   Auto-end: call-closed detection${CALL_END_GRACE_SEC:+ (grace ${CALL_END_GRACE_SEC}s)}, silence fallback ${AUTO_END_SEC}s"
   start_segment
@@ -660,7 +688,7 @@ cleanup_and_exit() {
 trap 'TRANSCRIBE_AFTER=0; cleanup_and_exit' INT
 
 log "🔴 Recording to $SESSION"
-log "   mic: [$MIC_IDX] $MIC_NAME ${SYS_DESC:+ |  $SYS_DESC}"
+log "   mic: $MIC_DESC ${SYS_DESC:+ |  $SYS_DESC}"
 log "   Keys:  p = pause/resume   e = end + transcribe   q = end (no transcribe)"
 start_segment
 

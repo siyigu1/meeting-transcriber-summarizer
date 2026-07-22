@@ -8,8 +8,11 @@ MEETING_DIR="${MEETING_DIR:-$HOME/meetings}"
 # Whisper model path (default: models/ggml-large-v3-turbo.bin next to the script)
 #WHISPER_MODEL="${WHISPER_MODEL:-$HOME/models/ggml-large-v3-turbo.bin}"
 
-# Audio devices as shown by: ffmpeg -f avfoundation -list_devices true -i ""
-#MIC_DEVICE="${MIC_DEVICE:-MacBook Pro Microphone}"
+# Mic: "default" (recommended) records the system default input, which follows
+# your headset's mic. A fixed device name (as shown by
+# `ffmpeg -f avfoundation -list_devices true -i ""`) would only catch muffled
+# room audio when a headset mic is active.
+#MIC_DEVICE="${MIC_DEVICE:-default}"
 #SYS_DEVICE="${SYS_DEVICE:-BlackHole 2ch}"
 
 # Speaker labels in transcripts
