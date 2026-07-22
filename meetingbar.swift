@@ -199,25 +199,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateUI() {
         let secs = readState()?.seconds ?? 0
+        let symbol: String
         let title: String
         let statusText: String
         switch mode {
         case .idle:
-            title = "🎙"; statusText = "Idle — watching for meetings"
+            symbol = "mic"; title = ""; statusText = "Idle — watching for meetings"
         case .prompt:
-            title = "🎙"; statusText = "Meeting detected"
+            symbol = "mic.badge.plus"; title = ""; statusText = "Meeting detected"
         case .starting:
-            title = "⏳"; statusText = "Starting recorder…"
+            symbol = "hourglass"; title = ""; statusText = "Starting recorder…"
         case .recording:
-            title = "🔴 " + fmt(secs); statusText = "Recording — " + fmt(secs)
+            symbol = "record.circle"; title = " " + fmt(secs); statusText = "Recording — " + fmt(secs)
         case .paused:
-            title = "⏸ " + fmt(secs); statusText = "Paused — " + fmt(secs)
+            symbol = "pause.circle"; title = " " + fmt(secs); statusText = "Paused — " + fmt(secs)
         case .transcribing:
-            title = "📝"; statusText = "Transcribing…"
+            symbol = "waveform"; title = ""; statusText = "Transcribing…"
         case .done:
-            title = "🎙"; statusText = "Transcript ready"
+            symbol = "checkmark.circle"; title = ""; statusText = "Transcript ready"
         }
-        statusItem.button?.title = title
+        if let btn = statusItem.button {
+            // template image: renders monochrome (white on a dark menu bar) like native icons
+            let img = NSImage(systemSymbolName: symbol, accessibilityDescription: statusText)
+            img?.isTemplate = true
+            btn.image = img
+            btn.imagePosition = title.isEmpty ? .imageOnly : .imageLeading
+            btn.title = title
+        }
         statusItem.menu = buildMenu(statusText)
 
         switch mode {
