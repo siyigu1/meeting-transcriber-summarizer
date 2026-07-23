@@ -45,7 +45,7 @@ struct SessionState {
     var transcribe = ""
 }
 
-enum Mode: Equatable { case idle, prompt, starting, recording, paused, transcribing, done }
+enum Mode: Equatable { case idle, prompt, starting, recording, paused, askTranscribe, transcribing, done }
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     var statusItem: NSStatusItem!
@@ -58,6 +58,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     var pollBusy = false
     var tickCount = 0
     var doneUntil = Date.distantPast
+    var deferPending = false        // user chose "after next meeting"
+    var askDeadline: Date? = nil    // unanswered ask auto-transcribes at this time
 
     func applicationDidFinishLaunching(_ note: Notification) {
         let info = sh(["info"], timeout: 10).out
@@ -104,42 +106,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func tick() {
         tickCount += 1
         let s = readState()
+        let queueLock = FileManager.default.fileExists(atPath: baseDir + "/.transcribe-queue.lock")
         var newMode = mode
         if let st = s, st.status == "recording", stateFresh(st.dir, within: 20) {
+            if mode != .recording && mode != .paused {
+                deferPending = false   // new meeting underway — re-ask about pending after it ends
+                askDeadline = nil
+            }
             newMode = .recording
         } else if let st = s, st.status == "paused", stateFresh(st.dir, within: 20) {
             newMode = .paused
-        } else if let st = s, st.status == "ended", st.transcribe == "running" {
+        } else if queueLock || (s?.status == "ended" && s?.transcribe == "running") {
             newMode = .transcribing
+        } else if s?.status == "ended", s?.transcribe == "pending", !deferPending,
+                  mode != .prompt, mode != .starting {
+            newMode = .askTranscribe
+            if askDeadline == nil { askDeadline = Date().addingTimeInterval(300) }
+            if let d = askDeadline, Date() >= d { startTranscribePending(); return }
         } else {
-            if mode == .transcribing, s?.transcribe == "done" {
+            if mode == .transcribing || mode == .askTranscribe, s?.transcribe == "done" {
                 newMode = .done
                 doneUntil = Date().addingTimeInterval(30)
             } else if mode == .done {
                 newMode = Date() < doneUntil ? .done : .idle
-            } else if mode == .recording || mode == .paused || mode == .transcribing {
-                newMode = .idle   // session vanished or was ended elsewhere
+            } else if mode == .recording || mode == .paused || mode == .transcribing || mode == .askTranscribe {
+                newMode = .idle   // session vanished or was handled elsewhere
             }
             // .idle / .prompt / .starting are managed by detectionPoll + actions
         }
         if newMode != mode { mode = newMode; updateUI() }
-        else if mode == .recording || mode == .paused { updateUI() }  // refresh elapsed time
+        else if mode == .recording || mode == .paused || mode == .askTranscribe { updateUI() }  // live countdowns
         if tickCount % 10 == 0 { detectionPoll() }
     }
 
+    // Detection keeps running while asking/transcribing/done, so a second meeting
+    // is never missed just because the first one is still being processed.
+    func pollableMode() -> Bool {
+        mode == .idle || mode == .prompt || mode == .askTranscribe || mode == .transcribing || mode == .done
+    }
+
     func detectionPoll() {
-        guard mode == .idle || mode == .prompt, !pollBusy else { return }
+        guard pollableMode(), !pollBusy else { return }
         pollBusy = true
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let active = sh(["call-check"], timeout: 15).code == 0
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.pollBusy = false
-                guard self.mode == .idle || self.mode == .prompt else { return }
+                guard self.pollableMode() else { return }
                 if active {
                     self.inactivePolls = 0
-                    if !self.ignoredThisCall && self.mode == .idle {
-                        self.mode = .prompt
+                    if !self.ignoredThisCall && self.mode != .prompt {
+                        self.mode = .prompt   // record-ask outranks ask/transcribing panels
                         self.updateUI()
                     }
                 } else {
@@ -186,6 +204,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         updateUI()
     }
 
+    @objc func doTranscribeNow() { startTranscribePending() }
+
+    @objc func doDeferTranscribe() {
+        deferPending = true
+        askDeadline = nil
+        mode = .idle
+        updateUI()
+    }
+
+    func startTranscribePending() {
+        askDeadline = nil
+        mode = .transcribing
+        updateUI()
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            sh(["transcribe-pending"], timeout: 7200)
+            DispatchQueue.main.async { self?.tick() }
+        }
+    }
+
     @objc func doOpenFolder() {
         NSWorkspace.shared.open(URL(fileURLWithPath: baseDir))
     }
@@ -199,6 +236,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func updateUI() {
         let secs = readState()?.seconds ?? 0
+        let askRem = max(0, Int(askDeadline?.timeIntervalSinceNow ?? 0))
         let symbol: String
         let title: String
         let statusText: String
@@ -213,6 +251,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             symbol = "record.circle"; title = " " + fmt(secs); statusText = "Recording — " + fmt(secs)
         case .paused:
             symbol = "pause.circle"; title = " " + fmt(secs); statusText = "Paused — " + fmt(secs)
+        case .askTranscribe:
+            symbol = "questionmark.circle"; title = ""
+            statusText = "Transcribe? auto-starts in " + fmt(askRem)
         case .transcribing:
             symbol = "waveform"; title = ""; statusText = "Transcribing…"
         case .done:
@@ -240,6 +281,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         case .paused:
             showPanel(text: "⏸ Paused — " + fmt(secs),
                       buttons: [("Resume", #selector(doResume)), ("Stop", #selector(doStop))])
+        case .askTranscribe:
+            showPanel(text: "Recording finished. Transcribe now?\nAuto-starts in \(fmt(askRem)) — defer if another\nmeeting is coming (all pending transcribe in order).",
+                      buttons: [("Transcribe now", #selector(doTranscribeNow)),
+                                ("After next meeting", #selector(doDeferTranscribe))])
         case .transcribing:
             showPanel(text: "📝 Transcribing…\n(~2.5x realtime; safe to walk away)", buttons: [])
         case .done:
@@ -264,15 +309,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         switch mode {
         case .recording:
-            item("Stop Recording (ends + transcribes)", #selector(doStop))
+            item("Stop Recording", #selector(doStop))
             item("Pause", #selector(doPause))
         case .paused:
-            item("Stop Recording (ends + transcribes)", #selector(doStop))
+            item("Stop Recording", #selector(doStop))
             item("Resume", #selector(doResume))
+        case .askTranscribe:
+            item("Transcribe Now", #selector(doTranscribeNow))
+            item("Transcribe After Next Meeting", #selector(doDeferTranscribe))
+            item("Start Recording Now", #selector(doRecord))
         case .starting, .transcribing:
             break
         default:
             item("Start Recording Now", #selector(doRecord))
+            if deferPending { item("Transcribe Pending Now", #selector(doTranscribeNow)) }
         }
         m.addItem(.separator())
         item("Open Meetings Folder", #selector(doOpenFolder))

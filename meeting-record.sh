@@ -67,7 +67,9 @@ OTHER_LABEL="${OTHER_LABEL:-Other}"                # transcript label for meetin
 CALL_END_GRACE_SEC="${CALL_END_GRACE_SEC:-60}"  # call signal must be gone this long (0 = disable call detection)
 AUTO_END_SEC="${AUTO_END_SEC:-300}"             # silence fallback duration (0 = disable)
 SILENCE_DB="${SILENCE_DB:--45}"                 # dBFS; a stream quieter than this counts as silent
-AUTO_TRANSCRIBE="${AUTO_TRANSCRIBE:-1}"         # daemon mode: transcribe in place after the recording ends (0 = off)
+AUTO_TRANSCRIBE="${AUTO_TRANSCRIBE:-1}"         # daemon mode: 1 = transcribe in place after the recording ends,
+                                                # ask = mark transcribe=pending and let the UI ask (back-to-back
+                                                # meetings: defer, then transcribe all pending in order), 0 = off
 WATCH_POLL_SEC="${WATCH_POLL_SEC:-10}"          # watch mode: seconds between live-call checks
 LANG_OPT="auto"
 NAME=""
@@ -212,6 +214,19 @@ recording_active() {  # true if the most recent session is currently recording o
 
 notify() {  # $1 = title, $2 = message — best-effort banner (may be hidden by Focus/notification settings)
   osascript -e "display notification \"$2\" with title \"$1\"" >/dev/null 2>&1 || true
+}
+
+pending_sessions() {  # true if any ended session awaits transcription
+  grep -l '^transcribe=pending$' "$BASE_DIR"/2*/state 2>/dev/null | head -1 | grep -q .
+}
+
+prompt_transcribe() {  # 0 = transcribe now (clicked or timed out), 1 = defer to after next meeting
+  local out
+  out=$(osascript -e 'display dialog "Recording finished. Transcribe now, or wait until after your next meeting?" with title "Meeting Recorder" buttons {"After next meeting","Transcribe now"} default button "Transcribe now" giving up after 300' 2>/dev/null) || return 0
+  case "$out" in
+    *"After next meeting"*) return 1 ;;
+    *) return 0 ;;
+  esac
 }
 
 prompt_record() {  # modal dialog: 0 = Record clicked, 1 = Ignore/dismissed, 2 = timed out
@@ -453,7 +468,7 @@ transcribe() {  # $1 = session dir
 
 CMD="record"
 case "${1:-}" in
-  record|start|watch|watch-start|watch-install|watch-uninstall|call-check|info) CMD="$1"; shift ;;
+  record|start|watch|watch-start|watch-install|watch-uninstall|call-check|info|transcribe-pending) CMD="$1"; shift ;;
   transcribe)
     CMD="transcribe" ; shift
     TARGET="${1:-}" ; shift || true
@@ -503,6 +518,36 @@ if [[ "$CMD" == "info" ]]; then
   exit 0
 fi
 
+# ---------- transcribe-pending: process deferred sessions, oldest first ----------
+
+if [[ "$CMD" == "transcribe-pending" ]]; then
+  command -v whisper-cli >/dev/null || die "whisper-cli not found (brew install whisper-cpp)."
+  LOCK="$BASE_DIR/.transcribe-queue.lock"
+  if [[ -f "$LOCK" ]] && kill -0 "$(cat "$LOCK" 2>/dev/null)" 2>/dev/null; then
+    die "transcribe-pending already running (pid $(cat "$LOCK"))."
+  fi
+  echo $$ > "$LOCK"
+  trap 'rm -f "$LOCK"' EXIT
+  FOUND=0
+  for dir in $(ls -1d "$BASE_DIR"/2*/ 2>/dev/null | sort); do   # name-sorted = chronological
+    dir="${dir%/}"
+    [[ -f "$dir/state" ]] || continue
+    grep -q '^transcribe=pending$' "$dir/state" && grep -q '^status=ended$' "$dir/state" || continue
+    FOUND=1
+    log "Transcribing pending session: $dir"
+    sed -i '' 's/^transcribe=pending$/transcribe=running/' "$dir/state"
+    if ( transcribe "$dir" ) >> "$dir/transcribe.log" 2>&1; then
+      sed -i '' 's/^transcribe=running$/transcribe=done/' "$dir/state"
+      log "  done: $dir/transcript.md"
+    else
+      sed -i '' 's/^transcribe=running$/transcribe=failed/' "$dir/state"
+      log "  ⚠️  FAILED — see $dir/transcribe.log"
+    fi
+  done
+  [[ "$FOUND" == 1 ]] || log "No pending sessions."
+  exit 0
+fi
+
 # ---------- watch mode (meeting auto-detect) ----------
 
 if [[ "$CMD" == "watch-start" ]]; then  # click target of the watch notification
@@ -525,9 +570,20 @@ if [[ "$CMD" == "watch-start" ]]; then  # click target of the watch notification
 fi
 
 if [[ "$CMD" == "watch" ]]; then
-  PROMPTED=0 ; INACTIVE_POLLS=0 ; TIMEOUTS=0
+  PROMPTED=0 ; INACTIVE_POLLS=0 ; TIMEOUTS=0 ; DEFER_PENDING=0
   log "👀 Watching for a live call every ${WATCH_POLL_SEC}s (Zoom / Slack huddle / Meet)."
   while true; do
+    if recording_active; then
+      DEFER_PENDING=0   # a new meeting is recording — re-ask about pending after it ends
+    elif [[ ! -f "$BASE_DIR/.transcribe-queue.lock" && "$DEFER_PENDING" == 0 ]] && pending_sessions; then
+      if prompt_transcribe; then
+        log "$(date '+%F %T') transcribing pending sessions"
+        nohup "$SCRIPT_DIR/meeting-record.sh" transcribe-pending >> "$BASE_DIR/.watch.log" 2>&1 &
+      else
+        DEFER_PENDING=1
+        log "$(date '+%F %T') transcription deferred until after the next meeting"
+      fi
+    fi
     if call_active; then
       INACTIVE_POLLS=0
       if [[ "$PROMPTED" == 0 ]] && ! recording_active; then
@@ -624,7 +680,11 @@ if [[ "$CMD" == "start" ]]; then
     END_REASON="${END_REASON:-manual}"
     write_state ended "$RECORDED"
     log "Ended (reason: $END_REASON). $(fmt_dur "$RECORDED") of audio in $SESSION"
-    if [[ "$AUTO_TRANSCRIBE" == 1 ]] && command -v whisper-cli >/dev/null && (( RECORDED > 0 )); then
+    if [[ "$AUTO_TRANSCRIBE" == "ask" ]] && command -v whisper-cli >/dev/null && (( RECORDED > 0 )); then
+      echo "transcribe=pending" >> "$SESSION/state"
+      log "Transcription deferred — the UI asks now/later (auto-starts if unanswered)."
+      log "Manual: $0 transcribe-pending"
+    elif [[ "$AUTO_TRANSCRIBE" == 1 ]] && command -v whisper-cli >/dev/null && (( RECORDED > 0 )); then
       echo "transcribe=running" >> "$SESSION/state"
       log "Transcribing (auto, ~2.5x realtime)... log: $SESSION/transcribe.log"
       if ( transcribe "$SESSION" ) >> "$SESSION/transcribe.log" 2>&1; then

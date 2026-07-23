@@ -75,6 +75,8 @@ With neither, the recorder still works but is mic-only (fine on speakers in a qu
 
 On `end` (manual or auto), the daemon transcribes the session in place by default (`AUTO_TRANSCRIBE=1`): `<session>/state` gains `transcribe=running`, then `transcribe=done` (or `failed`; whisper output goes to `<session>/transcribe.log`). Set `AUTO_TRANSCRIBE=0` to get the old stop-only behavior.
 
+**Back-to-back meetings:** set `AUTO_TRANSCRIBE=ask` and the daemon instead marks the session `transcribe=pending`; the UI (meetingbar panel, or a dialog in headless watch mode) asks whether to transcribe now or **after the next meeting** — unanswered, it auto-starts in 5 minutes. Deferring keeps the watcher free to catch and record the next meeting; afterwards you're asked again, and `transcribe-pending` processes every pending session oldest-first. Run `./meeting-record.sh transcribe-pending` to process the queue manually.
+
 ### Meeting watcher (auto-start) + menu bar app
 
 ```

@@ -18,9 +18,10 @@ Decide the mode from the user's intent:
 - **No specific intent** → resolve from the latest session's state, in this order:
   1. `status=recording|paused` → attach: report status and offer pause/resume/end control.
   2. `status=ended` + `transcribe=running` → wait for it (until-loop on state), then Summarize.
-  3. `status=ended`, no `transcript.md` (or `transcribe=failed`) → run Transcribe, then Summarize.
-  4. `transcript.md` exists but no `notes.md` → Summarize immediately, no questions asked.
-  5. Everything already has notes → nothing pending; ask what the user wants.
+  3. `status=ended` + `transcribe=pending` (AUTO_TRANSCRIBE=ask defers transcription for back-to-back meetings) → run `$REC transcribe-pending` as a background task — it processes ALL pending sessions oldest-first — then Summarize each.
+  4. `status=ended`, no `transcript.md` (or `transcribe=failed`) → run Transcribe, then Summarize.
+  5. `transcript.md` exists but no `notes.md` → Summarize immediately, no questions asked (several sessions may need notes after back-to-back meetings — do each in order).
+  6. Everything already has notes → nothing pending; ask what the user wants.
 
 ## Record
 
