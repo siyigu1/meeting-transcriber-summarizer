@@ -69,4 +69,5 @@ When the daemon background task completes WITHOUT the user having said "end": re
 
 ## After writing
 
-Report where notes were saved; nothing further by default. Revise `notes.md` in place if the user wants changes.
+1. **Rename the session folder** to append a short kebab-case description (2–5 words) of the meeting: `<date>_<HHMM>-<slug>` (e.g. `2026-07-26_2332-bridal-meeting`) — so sessions are identifiable at a glance. Then update `$MEETING_DIR/.current-session` if it points at the old path, and the `session=` line in `<session>/state`. Skip the rename if the folder already carries a descriptive slug. Sessions that never get notes keep their bare timestamp names.
+2. Report where notes were saved (use the new folder name); nothing further by default. Revise `notes.md` in place if the user wants changes.
