@@ -130,7 +130,15 @@ The recorder pads any capture-buffer gaps with silence (`aresample=async=1`) so 
 
 Environment variables, or a `config.local` file next to the script (gitignored) — copy `config.example`. Main knobs: `MEETING_DIR`, `MIC_DEVICE`, `SYS_DEVICE`, `ME_LABEL`/`OTHER_LABEL`, auto-end tuning, and `WHISPER_PROMPT` (a context prompt with names/jargon whisper tends to mis-hear).
 
-**Bluetooth headset mics:** `MIC_DEVICE=default` follows the system default input — but when that default is a Bluetooth (HFP) mic held by the call app, a second reader gets badly fragmented audio. The recorder therefore falls back to the built-in mic's room pickup automatically in that case (the startup line says so); set `BT_MIC_OK=1` to record the Bluetooth mic anyway.
+**Bluetooth headset mics:** `MIC_DEVICE=default` follows the system default input — but when that default is a Bluetooth (HFP) mic held by the call app, ffmpeg's capture gets badly fragmented audio. Build the bundled native capture helper once:
+
+```
+swiftc -O -o miccap miccap.swift
+```
+
+With it present, the recorder captures the Bluetooth mic through CoreAudio at its native format (gap-padded, format-change tolerant) — the startup line shows `via native mic tap`. Without it, the recorder falls back to the built-in mic's room pickup (often too muffled to transcribe well); `BT_MIC_OK=1` forces ffmpeg onto the Bluetooth mic anyway.
+
+The recorder also sanity-checks each track after recording: if a captured track is much shorter than the session, it logs a warning and sets `capture_warning=` in `<session>/state`.
 
 Transcription language is auto-detected; force it with `--lang zh`, `--lang en`, etc.
 

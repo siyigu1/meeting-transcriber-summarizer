@@ -96,10 +96,15 @@ start_segment() {  # spawns ffmpeg recorders for segment $SEG
   # aresample=async=1 pads timestamp gaps with silence: without it, dropped
   # capture buffers silently shorten the track and drift it out of sync with
   # the system stream. Capture diagnostics go to capture.log.
-  ffmpeg -hide_banner -loglevel warning -f avfoundation -i ":${MIC_IDX}" \
-    -af "aresample=async=1" \
-    -ac 1 -ar 16000 -c:a pcm_s16le "$SESSION/${tag}-mic.wav" 2>>"$SESSION/capture.log" &
-  MIC_PID=$!
+  if [[ "${MIC_MODE:-ffmpeg}" == "miccap" ]]; then
+    "$SCRIPT_DIR/miccap" "$SESSION/${tag}-mic.wav" 2>>"$SESSION/capture.log" &
+    MIC_PID=$!
+  else
+    ffmpeg -hide_banner -loglevel warning -f avfoundation -i ":${MIC_IDX}" \
+      -af "aresample=async=1" \
+      -ac 1 -ar 16000 -c:a pcm_s16le "$SESSION/${tag}-mic.wav" 2>>"$SESSION/capture.log" &
+    MIC_PID=$!
+  fi
   case "$SYS_MODE" in
     tap)
       "$SCRIPT_DIR/audiotap" "$SESSION/${tag}-sys.wav" 2>>"$SESSION/capture.log" &
@@ -155,6 +160,7 @@ write_state() {  # $1 = status, $2 = recorded seconds
     echo "recorded_seconds=$2"
     echo "silence_seconds=${SILENCE_ACC:-0}"
     [[ -n "${END_REASON:-}" ]] && echo "reason=$END_REASON"
+    [[ -n "${CAPTURE_WARN:-}" ]] && echo "capture_warning=$CAPTURE_WARN"
     echo "session=$SESSION"
   } > "$SESSION/state"
 }
@@ -263,16 +269,25 @@ setup_session() {
     local info transport defname bname
     info=$(default_input_info)
     transport="${info%%$'\t'*}" ; defname="${info#*$'\t'}"
-    MIC_IDX=""
-    # Bluetooth (HFP) mics fragment badly when a second client reads them while
-    # the call app holds them — prefer the built-in mic's room pickup instead.
-    # Set BT_MIC_OK=1 to record the Bluetooth mic anyway.
+    MIC_IDX="" ; MIC_MODE="ffmpeg"
+    # Bluetooth (HFP) mics fragment badly when ffmpeg reads them while the call
+    # app holds them. Preferred: the native `miccap` helper (build with:
+    # swiftc -O -o miccap miccap.swift), which captures the Bluetooth mic
+    # cleanly. Fallbacks: built-in mic's room pickup, or BT_MIC_OK=1 to force
+    # ffmpeg onto the Bluetooth mic anyway.
     if [[ "$transport" == "Bluetooth" && "${BT_MIC_OK:-0}" != 1 ]]; then
-      bname=$(builtin_input_name)
-      if [[ -n "$bname" ]]; then
-        MIC_IDX=$(device_index "$bname")
-        [[ -n "$MIC_IDX" ]] && MIC_DESC="[$MIC_IDX] $bname (default input '$defname' is Bluetooth — using built-in mic)"
+      if [[ -x "$SCRIPT_DIR/miccap" ]] &&
+         "$SCRIPT_DIR/miccap" "$BASE_DIR/.miccap-probe.wav" 0.3 >/dev/null 2>&1; then
+        MIC_MODE="miccap" ; MIC_IDX="-"
+        MIC_DESC="default input ($defname) via native mic tap"
+      else
+        bname=$(builtin_input_name)
+        if [[ -n "$bname" ]]; then
+          MIC_IDX=$(device_index "$bname")
+          [[ -n "$MIC_IDX" ]] && MIC_DESC="[$MIC_IDX] $bname (default input '$defname' is Bluetooth — using built-in mic)"
+        fi
       fi
+      rm -f "$BASE_DIR/.miccap-probe.wav"
     fi
     if [[ -z "$MIC_IDX" ]]; then
       MIC_IDX="default"   # avfoundation resolves the system default input at start
@@ -675,11 +690,26 @@ if [[ "$CMD" == "start" ]]; then
   setup_session
   : > "$SESSION/control"
   SILENCE_ACC=0 ; END_REASON="" ; CALL_SEEN=0 ; CALL_GONE=0 ; LAST_CHECK=$SECONDS
+  check_capture_health() {  # $1 = mic|sys — warn if the track is far shorter than the recording
+    local kind="$1" total=0 f d
+    for f in "$SESSION"/seg-*-"$kind".wav; do
+      [[ -s "$f" ]] || continue
+      d=$(wav_dur "$f")
+      total=$(awk -v a="$total" -v b="${d:-0}" 'BEGIN{print a+b}')
+    done
+    if (( RECORDED > 10 )) && awk -v t="$total" -v r="$RECORDED" 'BEGIN{exit !(t < r*0.8)}'; then
+      log "⚠️  $kind track holds ${total%.*}s of audio but ${RECORDED}s were recorded — $kind capture failed partway; check capture.log"
+      CAPTURE_WARN="${CAPTURE_WARN:+$CAPTURE_WARN,}${kind}_short"
+      echo "capture_warning=${kind}_short" >> "$SESSION/state"
+    fi
+  }
   daemon_stop() {
     [[ "$PAUSED" == 0 ]] && stop_segment
     END_REASON="${END_REASON:-manual}"
     write_state ended "$RECORDED"
     log "Ended (reason: $END_REASON). $(fmt_dur "$RECORDED") of audio in $SESSION"
+    check_capture_health mic
+    check_capture_health sys
     if [[ "$AUTO_TRANSCRIBE" == "ask" ]] && command -v whisper-cli >/dev/null && (( RECORDED > 0 )); then
       echo "transcribe=pending" >> "$SESSION/state"
       log "Transcription deferred — the UI asks now/later (auto-starts if unanswered)."

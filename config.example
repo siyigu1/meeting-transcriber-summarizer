@@ -11,11 +11,12 @@ MEETING_DIR="${MEETING_DIR:-$HOME/meetings}"
 # Mic: "default" (recommended) records the system default input, which follows
 # your headset's mic. A fixed device name (as shown by
 # `ffmpeg -f avfoundation -list_devices true -i ""`) would only catch muffled
-# room audio when a headset mic is active. Exception: when the default input is
-# a Bluetooth (HFP) mic, the recorder uses the built-in mic instead — a second
-# reader on an in-call Bluetooth mic gets badly fragmented audio.
+# room audio when a headset mic is active. When the default input is a
+# Bluetooth (HFP) mic, the recorder prefers the native `miccap` helper (build:
+# swiftc -O -o miccap miccap.swift) — ffmpeg reading an in-call Bluetooth mic
+# gets badly fragmented audio. Without miccap it falls back to the built-in mic.
 #MIC_DEVICE="${MIC_DEVICE:-default}"
-#BT_MIC_OK="${BT_MIC_OK:-0}"     # 1 = record a Bluetooth default mic anyway
+#BT_MIC_OK="${BT_MIC_OK:-0}"     # 1 = force ffmpeg onto a Bluetooth default mic
 #SYS_DEVICE="${SYS_DEVICE:-BlackHole 2ch}"
 
 # Optional VAD model (strongly recommended; see README) — enables voice activity
