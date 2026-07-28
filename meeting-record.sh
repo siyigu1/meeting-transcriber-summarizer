@@ -354,8 +354,11 @@ transcribe() {  # $1 = session dir
          awk -v a="$micd" -v b="$sysd" 'BEGIN{d=a-b; if(d<0)d=-d; exit !(d>3)}'; then
         log "⚠️  $(basename "${mic%-mic.wav}"): mic (${micd%.*}s) and system (${sysd%.*}s) tracks diverged — audio was dropped during capture; transcript alignment may suffer."
       fi
+      # Listening mix: level each channel's speech before summing (a quiet
+      # headset mic would otherwise be buried under the system audio) and
+      # limit the sum so simultaneous speech can't clip into distortion.
       ffmpeg -hide_banner -loglevel error -y -i "$mic" -i "$sys" \
-        -filter_complex "amix=inputs=2:duration=longest:normalize=0" \
+        -filter_complex "[0:a]speechnorm=e=12.5:r=0.0001:l=1[a];[1:a]speechnorm=e=12.5:r=0.0001:l=1[b];[a][b]amix=inputs=2:duration=longest:normalize=0,alimiter=limit=0.95" \
         -ac 1 -ar 16000 -c:a pcm_s16le "$out" || cp "$mic" "$out"
     else
       cp "$mic" "$out"
