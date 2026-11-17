@@ -203,7 +203,7 @@ call_active() {  # true if a Zoom call, Slack huddle, or Google Meet call is cur
     lsof -a -c "Google Chrome" -iUDP -nP 2>/dev/null | grep -qE ':193[0-9]{2}$' && return 0
     # Meet tab: an open tab on an in-meeting URL (needs Automation-for-Chrome permission)
     osascript -e 'tell application "Google Chrome" to get URL of tabs of every window' 2>/dev/null |
-      grep -qE 'meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}' && return 0
+      grep -qE 'meet\.google\.com/(meet/)?[a-z]{3}-[a-z]{4}-[a-z]{3}' && return 0
   fi
   return 1
 }
